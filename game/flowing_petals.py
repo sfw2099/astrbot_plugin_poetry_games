@@ -1,148 +1,63 @@
 import re
-import asyncio
-from astrbot.api.event import AstrMessageEvent
-from astrbot.api import logger
-from .base_game import BaseGame
+try:
+    # 当作为 AstrBot 插件或模块运行时，使用相对导入
+    from .base_game import BaseGameEngine
+except ImportError:
+    # 当在本地作为单个脚本直接运行时，使用同级绝对导入
+    from base_game import BaseGameEngine
 
-class FlowingPetalsGame(BaseGame):
-    def __init__(self, session_id, db, config, on_game_end):
-        super().__init__(session_id, db, config, on_game_end)
-        self.players = []
-        self.history = []
-        self.used_verses = []
-        self.banned_score_chars = set()
-        self.current_turn = 0
-        self.turn_counter = 0
+class FlowingPetalsEngine(BaseGameEngine):
+    def __init__(self, session_id, db_source, save_dir):
+        super().__init__(session_id, db_source, save_dir)
+        if not self.state["custom_data"]:
+            self.state["custom_data"] = {
+                "used_verses_keys": [],
+                "banned_score_chars": []
+            }
 
-        try:
-            self.timeout_seconds = int(self.config.get("timeout_seconds", 90))
-        except (ValueError, TypeError):
-            self.timeout_seconds = 90  # 如果用户瞎填了字母，提供一个保底默认值
-            
-        self.latest_event = None
-
-    def get_status_str(self):
-        resp = [" 当前局势情况："]
-        for i, p in enumerate(self.players, 1):
-            tag = " 👈 当前轮次" if (i-1) == self.current_turn else ""
-            resp.append(f"{i}. 【{p['name']}】积分：{p['score']}{tag}")
+    def step(self, action_type, user_id, user_name, payload=""):
+        self.update_activity()
+        user_id = str(user_id)
         
-        if self.banned_score_chars:
-            banned = "、".join(self.banned_score_chars)
-            resp.append(f"\n 计分冷却字：{banned} (本轮使用这些字不计分)")
-        return "\n".join(resp)
-
-    def get_history_str(self):
-        if not self.used_verses:
-            return " 暂无接龙记录。"
-        resp = [" 本局接龙记录："]
-        for i, (t, a, c) in enumerate(self.used_verses, 1):
-            resp.append(f"{i}. {c} ({a}·《{t}》)")
-        return "\n".join(resp)
-
-    def start_timer(self, event: AstrMessageEvent):
-        self.latest_event = event
-        if self.timer_task:
-            self.timer_task.cancel()
-        self.turn_counter += 1
-        current_counter = self.turn_counter
-        
-        async def timer_task():
-            try:
-                await asyncio.sleep(self.timeout_seconds)
-                if self.turn_counter == current_counter:
-                    await self._handle_timeout()
-            except asyncio.CancelledError:
-                pass 
-            except Exception as e:
-                logger.error(f"飞花令倒计时任务崩溃: {e}") 
-                
-        self.timer_task = asyncio.create_task(timer_task())
-
-    async def _handle_timeout(self):
-        if not self.latest_event: return
-        event = self.latest_event
-
-        # logger.info(f"Session {self.session_id} timeout triggered.")
-        if not self.players:
-            try:
-                await event.send(event.plain_result(f" {self.timeout_seconds}秒内无玩家加入，飞花令已自动结束。"))
-            except Exception as e:
-                logger.error(f"发送无人加入提示失败: {e}")
-            self.stop_game()
-            return
+        if action_type == "join":
+            return self.process_join(user_id, user_name)
             
-        current_player = self.players[self.current_turn]['name']
-        if len(self.players) > 1:
-            self.current_turn = (self.current_turn + 1) % len(self.players)
-            next_player = self.players[self.current_turn]['name']
-            timeout_msg = f" 玩家【{current_player}】超时。跳过本轮。\n👉 当前轮到：【{next_player}】\n\n" + self.get_status_str()
-            try:
-                await event.send(event.plain_result(timeout_msg))
-            except Exception as e:
-                logger.error(f"发送轮换提示失败: {e}")
-            self.start_timer(event)
-        else:
-            try:
-                await event.send(event.plain_result(f" 玩家【{current_player}】超时。\n 飞花令自动结束。"))
-            except Exception as e:
-                logger.error(f"发送玩家超时结束提示失败: {e}")
-            # 注意：先发消息，再彻底销毁游戏实例
-            self.stop_game()
+        if not self.state["players"]: return {"status": "ignore"}
+        
+        current_p = self.state["players"][self.state["current_turn"]]
+        if user_id != current_p['id']: return {"status": "ignore"}
 
-    async def process_msg(self, event: AstrMessageEvent, msg_raw: str, user_id: str, user_name: str):
-        # 1. 加入逻辑
-        join_match = re.match(r'^(\d+)\s*[+＋]\s*加入$', msg_raw)
-        if join_match:
-            idx = int(join_match.group(1)) - 1
-            if idx == len(self.players):
-                if user_id in [p['id'] for p in self.players]:
-                    yield event.plain_result(" 您已在名单中。")
-                    return
-                self.players.append({'id': user_id, 'name': user_name, 'score': 0})
-                yield event.plain_result(f" 【{user_name}】加入成功！\n" + self.get_status_str())
-                self.start_timer(event)
-                event.stop_event()
-                return
-            return
+        msg_raw = payload.strip()
+        verse = re.sub(r'[^\u4e00-\u9fa5]', '', msg_raw)
+        if not verse: return {"status": "ignore"}
 
-        # 2. 接龙权限校验
-        if not self.players: return
-        p_ids = [p['id'] for p in self.players]
-        if user_id not in p_ids or p_ids.index(user_id) != self.current_turn: return
-
-        # 3. 诗库与查重校验
-        poetry_info = self.db.check_exact_poetry(msg_raw)
-        if not poetry_info:
-            event.stop_event()
-            yield event.plain_result(" 库中未查到该句。")
-            return
+        poetry_info = self._check_db(msg_raw)
+        if not poetry_info: return {"status": "error", "msg": "库中未查到该句。"}
         
         title, author, dynasty = poetry_info
-        verse_key = (title, author, msg_raw)
-        if verse_key in self.used_verses:
-            event.stop_event()
-            yield event.plain_result(f" 诗句重复！本局已出现过：\n{msg_raw} ({author}·《{title}》)")
-            return
+        verse_key = f"{title}_{author}_{msg_raw}"
+        
+        custom = self.state["custom_data"]
+        if verse_key in custom["used_verses_keys"]:
+            return {"status": "error", "msg": f"诗句重复！本局已出现过该句。"}
 
-        # 4. 算分与标记逻辑
-        curr_num = len(self.history) + 1
+        curr_num = len(self.state["history"]) + 1
         score_add = 0
         match_count = 0
         this_turn_scored_chars = set()
-        last_banned = self.banned_score_chars
+        last_banned = set(custom["banned_score_chars"])
 
         if curr_num > 2:
-            prev2, prev1 = self.history[-2], self.history[-1]
-            if not (set(msg_raw) & set(prev2) and set(msg_raw) & set(prev1)):
-                event.stop_event()
-                yield event.plain_result(" 不符衔字规则！需含前两句各至少一字。")
-                return
-
-            sc_list = list(msg_raw)
-            s2_list, s1_list = list(prev2), list(prev1)
+            prev2 = re.sub(r'[^\u4e00-\u9fa5]', '', self.state["history"][-2])
+            prev1 = re.sub(r'[^\u4e00-\u9fa5]', '', self.state["history"][-1])
             
+            if not (set(verse) & set(prev2) and set(verse) & set(prev1)):
+                return {"status": "error", "msg": "不符衔字规则！需含前两句各至少一字。"}
+
+            sc_list = list(verse)
+            s2_list, s1_list = list(prev2), list(prev1)
             sc_rem = []
+            
             for c in sc_list:
                 if c in s2_list and c not in last_banned:
                     match_count += 1
@@ -156,48 +71,55 @@ class FlowingPetalsGame(BaseGame):
                     s1_list.remove(c)
                     this_turn_scored_chars.add(c)
             
-            if match_count > 0: score_add = 2 ** match_count
+        if match_count > 0: score_add = 2 ** match_count
 
-        # 5. 状态刷新与消息分发
-        self.players[self.current_turn]['score'] += score_add
-        self.used_verses.append(verse_key)
-        self.history.append(msg_raw)
-        self.banned_score_chars = this_turn_scored_chars
-
-        res_main = [f" 【{user_name}】接龙成功！"]
-        if curr_num > 2:
-            res_main.append(f" 匹配字数：{match_count} (冷却排除：{'、'.join(last_banned) if last_banned else '无'})")
-            res_main.append(f" 获得积分：{score_add}，总分：{self.players[self.current_turn]['score']}")
-        else:
-            res_main.append(" 铺垫阶段，暂不计分。")
+        # 结算
+        current_p['score'] += score_add
+        custom["used_verses_keys"].append(verse_key)
+        self.state["history"].append(f"{msg_raw} ({author}·《{title}》)")
+        custom["banned_score_chars"] = list(this_turn_scored_chars)
         
-        res_main.append("-" * 15)
-        visual_set = set(msg_raw) & (set(self.history[-2] if curr_num > 1 else "") | set(self.history[-3] if curr_num > 2 else ""))
-        def mark(t, s): return "".join([f"【{c}】" if c in s else c for c in t])
+        self.state["turn_count"] += 1
+        self.record_round_scores()
+        self.next_turn()
+        self.save_state()
+
+        next_name = self.state["players"][self.state["current_turn"]]["name"]
         
-        for i in range(max(0, curr_num-3), curr_num-1):
-            res_main.append(f"{i+1}. {mark(self.history[i], set(msg_raw))}")
-        res_main.append(f"{curr_num}. {mark(msg_raw, visual_set)} ({author}·《{title}》)")
-
-        yield event.plain_result("\n".join(res_main))
-
-        # 下一玩家提醒
-        if len(self.players) > 1:
-            self.current_turn = (self.current_turn + 1) % len(self.players)
-            next_player = self.players[self.current_turn]['name']
-            reminder = [
-                f"👉 下一名玩家：【{next_player}】",
-                f" 限时：{self.timeout_seconds}s",
-                f" 计分冷却字：{'、'.join(this_turn_scored_chars) if this_turn_scored_chars else '无'}"
-            ]
-            yield event.plain_result("\n".join(reminder)) 
-        else:
-            yield event.plain_result(" 正在等待更多玩家加入...")
+        # 🌟 提取冷却字信息
+        last_banned_str = "、".join(last_banned) if last_banned else "无"
+        next_banned_str = "、".join(this_turn_scored_chars) if this_turn_scored_chars else "无"
         
-        self.start_timer(event)
-        event.stop_event()
+        # 🌟 构造带冷却字标示的反馈信息
+        msg = (
+            f"✅ [{user_name}] 接龙成功！\n"
+            f"📖 诗句：{msg_raw} ({author})\n"
+            f"✨ 本轮得分：+{score_add} 分 (匹配 {match_count} 字，冷却排除：{last_banned_str})\n"
+            f"📈 当前总分：{current_p['score']} 分\n"
+            f"🧊 产生冷却：{next_banned_str} (下家不可用此计分)\n"
+            f"{'-'*15}\n"
+            f"👉 下一位：[{next_name}]"
+        )
+        return {"status": "success", "msg": msg}
 
-
-
-
-
+# ================= 本地运行测试 =================
+if __name__ == "__main__":
+    import os
+    db_path = r"D:\ALin-Data\AstrBot-plugins\poetry_data.db" 
+    
+    if not os.path.exists(db_path):
+        print(f"错误：数据库文件不存在: {db_path}")
+    else:
+        engine = FlowingPetalsEngine(session_id="local_test", db_source=db_path, save_dir="./saves")
+        engine.step("join", "u1", "阿麟")
+        engine.step("join", "u2", "测试员张三")
+        
+        while True:
+            curr_player = engine.state["players"][engine.state["current_turn"]]
+            user_text = input(f"\n[{curr_player['name']}] > ").strip()
+            if user_text.lower() == 'q': break
+            
+            response = engine.step("play", curr_player["id"], curr_player["name"], user_text)
+            # 🌟 修复点：确保只在此处统一打印一次
+            if response.get("status") != "ignore" and response.get("msg"):
+                print(f"\n{response['msg']}")
