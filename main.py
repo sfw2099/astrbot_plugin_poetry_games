@@ -29,37 +29,60 @@ class PoetryPlugin(Star):
         asyncio.create_task(self.prepare_database())
 
     async def prepare_database(self):
-        """检查并准备数据库"""
-        # 如果文件已存在且大小不为 0 (防止之前生成的 0KB 空文件干扰)
+        """检查并准备数据库：直接下载 .db 文件并显示进度"""
         if self.db_file.exists() and self.db_file.stat().st_size > 0:
             try:
                 self.db = PoetryDB(str(self.db_file))
-                logger.info(" 数据库已就绪。")
+                logger.info("✅ 数据库已就绪。")
                 return
             except Exception:
-                logger.warning(" 检测到损坏的数据库文件，准备重新下载...")
+                logger.warning("⚠️ 检测到损坏的数据库文件，准备重新下载...")
                 os.remove(self.db_file)
 
-        logger.info(f"📡 正在从 Release 下载数据库，请稍候...")
+        logger.info(f"📡 正在从 Release 下载数据库，请稍候 (文件较大，可能需要几分钟)...")
         
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(self.download_url) as resp:
                     if resp.status != 200:
-                        logger.error(f" 下载失败，状态码: {resp.status}。请检查链接是否有效。")
+                        logger.error(f"❌ 下载失败，状态码: {resp.status}。请检查链接是否有效。")
                         return
+                    
+                    # 获取文件总大小 (字节)
+                    total_size = int(resp.headers.get('Content-Length', 0))
+                    downloaded_size = 0
+                    last_log_percent = 0
                     
                     with open(self.db_file, "wb") as f:
                         while True:
                             chunk = await resp.content.read(8192)
-                            if not chunk: break
+                            if not chunk: 
+                                break
+                            
                             f.write(chunk)
+                            downloaded_size += len(chunk)
+                            
+                            # 计算并打印进度
+                            if total_size > 0:
+                                percent = int((downloaded_size / total_size) * 100)
+                                # 每增加 10% 打印一次日志，防止刷屏
+                                if percent >= last_log_percent + 10:
+                                    mb_downloaded = downloaded_size / (1024 * 1024)
+                                    mb_total = total_size / (1024 * 1024)
+                                    logger.info(f"⏳ 数据库下载进度: {percent}% ({mb_downloaded:.1f}MB / {mb_total:.1f}MB)")
+                                    last_log_percent = percent
+                            else:
+                                # 如果服务器没返回 Content-Length (比较少见)，就按每下载 50MB 提示一次
+                                mb_downloaded = downloaded_size / (1024 * 1024)
+                                if mb_downloaded >= last_log_percent + 50:
+                                    logger.info(f"⏳ 已下载: {mb_downloaded:.1f}MB...")
+                                    last_log_percent = int(mb_downloaded)
             
             self.db = PoetryDB(str(self.db_file))
-            logger.info(" 数据库下载并加载成功！")
+            logger.info("✅ 数据库下载并加载成功！")
             
         except Exception as e:
-            logger.error(f" 自动下载数据库失败: {e}")
+            logger.error(f"❌ 自动下载数据库失败: {e}")
         
         # 游戏会话池：存储所有群组正在进行的游戏引擎实例
         self.active_games = {} 
