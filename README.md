@@ -1,4 +1,4 @@
-# 🌸 AstrBot Poetry Pro (衔字飞花令-模块化战术版)
+# 🌸 AstrBot Poetry Game
 
 这是一个用于 **AstrBot** 的诗词插件。通过存在于本地的数据库，进行诗词查询和诗词游戏进行。
 
