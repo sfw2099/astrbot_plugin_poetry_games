@@ -60,12 +60,11 @@ class FlowingPetalsGame(BaseGame):
 
         logger.info(f"Session {self.session_id} timeout triggered.")
         if not self.players:
-            # 无人加入时彻底销毁游戏实例
-            self.stop_game()
             try:
                 await event.send(event.plain_result(f" {self.timeout_seconds}秒内无玩家加入，飞花令已自动结束。"))
             except Exception as e:
-                pass # 防止 event 失效导致报错
+                logger.error(f"发送无人加入提示失败: {e}")
+            self.stop_game()
             return
             
         current_player = self.players[self.current_turn]['name']
@@ -73,11 +72,18 @@ class FlowingPetalsGame(BaseGame):
             self.current_turn = (self.current_turn + 1) % len(self.players)
             next_player = self.players[self.current_turn]['name']
             timeout_msg = f" 玩家【{current_player}】超时。跳过本轮。\n👉 当前轮到：【{next_player}】\n\n" + self.get_status_str()
-            await event.send(event.plain_result(timeout_msg))
+            try:
+                await event.send(event.plain_result(timeout_msg))
+            except Exception as e:
+                logger.error(f"发送轮换提示失败: {e}")
             self.start_timer(event)
         else:
+            try:
+                await event.send(event.plain_result(f" 玩家【{current_player}】超时。\n 飞花令自动结束。"))
+            except Exception as e:
+                logger.error(f"发送玩家超时结束提示失败: {e}")
+            # 注意：先发消息，再彻底销毁游戏实例
             self.stop_game()
-            await event.send(event.plain_result(f" 玩家【{current_player}】超时。\n 飞花令自动结束。"))
 
     async def process_msg(self, event: AstrMessageEvent, msg_raw: str, user_id: str, user_name: str):
         # 1. 加入逻辑
@@ -185,5 +191,6 @@ class FlowingPetalsGame(BaseGame):
         
         self.start_timer(event)
         event.stop_event()
+
 
 
