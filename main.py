@@ -70,6 +70,9 @@ class PoetryPlugin(Star):
     # ==========================================
     @filter.command("查询诗句")
     async def find_sentence(self, event: AstrMessageEvent, sentence: str):
+        if not self.db: 
+            yield event.plain_result(" 数据库正在从 GitHub 赶来（首次运行下载中），请稍后再试...")
+            return
         results = self.db.search_by_sentence(sentence)
         if not results:
             yield event.plain_result(f" 未找到包含“{sentence}”的内容。")
@@ -81,6 +84,9 @@ class PoetryPlugin(Star):
 
     @filter.command("查询诗词")
     async def find_full_poem(self, event: AstrMessageEvent, title_kw: str):
+        if not self.db: 
+            yield event.plain_result(" 数据库正在从 GitHub 赶来（首次运行下载中），请稍后再试...")
+            return
         results = self.db.get_poem_by_title(title_kw)
         if not results:
             yield event.plain_result(f" 未找到标题包含“{title_kw}”的诗词。")
@@ -97,6 +103,9 @@ class PoetryPlugin(Star):
     # ==========================================
     @filter.command("飞花令")
     async def start_flower(self, event: AstrMessageEvent):
+        if not self.db: 
+            yield event.plain_result(" 数据库正在从 GitHub 赶来（首次运行下载中），请稍后再试...")
+            return
         session_id = event.get_group_id() or event.get_session_id()
         if session_id in self.active_games:
             yield event.plain_result(" 当前群聊已有游戏正在进行中。")
