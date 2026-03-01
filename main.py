@@ -6,7 +6,7 @@ import os
 from .database import PoetryDB
 from .game.flowing_petals import FlowingPetalsGame
 
-@register("astrbot_plugin_poetry_gamse", "ALin", "诗词游戏", "2.1.0")
+@register("astrbot_plugin_poetry_gamse", "ALin", "诗词诗句查询/衔字飞花令", "2.1.0")
 class PoetryPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
