@@ -1,6 +1,6 @@
 name: astrbot_plugin_poetry_games # 插件唯一识别名，以 astrbot_plugin_ 前缀开头
 display_name: 诗词游戏 # 用于展示的名字，可以是方便人类阅读的名字（需要版本 >= v4.5.0，低版本不会报错，请放心填写）
-desc: 诗词诗句查询/衔字飞花令。 # 插件简短描述
+desc: 这是一个用于 AstrBot 的诗词插件。通过存在于本地的数据库，进行诗词查询和诗词游戏。 # 插件简短描述
 version: 2.1.0 # 插件版本号。格式：v1.1.1 或者 v1.1
 author: ALin # 作者
 repo: https://github.com/sfw2099/astrbot_plugin_poetry_games # 插件的仓库地址
