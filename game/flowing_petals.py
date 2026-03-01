@@ -1,6 +1,7 @@
 import re
 import asyncio
 from astrbot.api.event import AstrMessageEvent
+from astrbot.api import logger
 from .base_game import BaseGame
 
 class FlowingPetalsGame(BaseGame):
@@ -48,6 +49,9 @@ class FlowingPetalsGame(BaseGame):
                     await self._handle_timeout()
             except asyncio.CancelledError:
                 pass 
+            except Exception as e:
+                logger.error(f"飞花令倒计时任务崩溃: {e}") 
+                
         self.timer_task = asyncio.create_task(timer_task())
 
     async def _handle_timeout(self):
@@ -181,4 +185,5 @@ class FlowingPetalsGame(BaseGame):
         
         self.start_timer(event)
         event.stop_event()
+
 
