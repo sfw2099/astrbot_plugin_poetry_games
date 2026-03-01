@@ -58,7 +58,7 @@ class FlowingPetalsGame(BaseGame):
         if not self.latest_event: return
         event = self.latest_event
 
-        logger.info(f"Session {self.session_id} timeout triggered.")
+        # logger.info(f"Session {self.session_id} timeout triggered.")
         if not self.players:
             try:
                 await event.send(event.plain_result(f" {self.timeout_seconds}秒内无玩家加入，飞花令已自动结束。"))
@@ -191,6 +191,7 @@ class FlowingPetalsGame(BaseGame):
         
         self.start_timer(event)
         event.stop_event()
+
 
 
 
