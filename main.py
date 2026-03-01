@@ -1,20 +1,34 @@
 from astrbot.api.event import filter, AstrMessageEvent
-from astrbot.api.star import Context, Star, register
+from astrbot.api.star import Context, Star, register, StarTools  # <-- 引入 StarTools
 from astrbot.api import logger, AstrBotConfig
 import os
+import shutil  
 
 from .database import PoetryDB
 from .game.flowing_petals import FlowingPetalsGame
 
-@register("astrbot_plugin_poetry_gamse", "ALin", "诗词诗句查询/衔字飞花令", "2.1.0")
+@register("astrbot_plugin_poetry_games", "ALin", "诗词游戏", "2.1.0")
 class PoetryPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
-        curr_dir = os.path.dirname(__file__)
         
-        self.db_file = os.path.join(curr_dir, 'poetry_data.db')
+        # 1. 获取当前代码所在目录（初始数据库存放处）
+        curr_dir = os.path.dirname(__file__)
+        original_db_path = os.path.join(curr_dir, 'poetry_data.db')
+        
+        # 2. 获取 AstrBot 官方标准的持久化数据目录
+        plugin_data_dir = StarTools.get_data_dir("astrbot_plugin_poetry_games")
+        plugin_data_dir.mkdir(parents=True, exist_ok=True) # 确保目录存在
+        
+        self.db_file = str(plugin_data_dir / 'poetry_data.db')
+        
+        # 3. 如果标准目录下没有数据库（如首次安装），则从代码目录拷贝过去
         if not os.path.exists(self.db_file):
-            self.db_file = os.path.join(os.getcwd(), 'data/plugins/astrbot_plugin_flowing_petals_linking_lines/poetry_data.db')
+            if os.path.exists(original_db_path):
+                shutil.copyfile(original_db_path, self.db_file)
+                logger.info(f" 已将初始数据库复制到持久化目录: {self.db_file}")
+            else:
+                logger.error(" 严重错误：未找到初始的 poetry_data.db 文件！")
         
         self.db = PoetryDB(self.db_file)
         self.config = config
