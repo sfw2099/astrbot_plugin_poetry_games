@@ -37,36 +37,69 @@ class PoetryPlugin(Star):
 
         asyncio.create_task(self.prepare_database())
 
+        # 预构建数据库下载地址
+        self.db_release_url = "https://github.com/sfw2099/astrbot_plugin_poetry_games/releases/download/data-v3.0.0/poetry_data.zip"
+
     async def prepare_database(self):
-        """检查并准备数据库：优先使用已有 .db，否则从 JSON 构建"""
+        """检查并准备数据库：已有 .db > 从 JSON 构建 > 下载预构建 .db"""
         if self.db_file.exists() and self.db_file.stat().st_size > 0:
             try:
                 self.db = PoetryDB(str(self.db_file))
                 logger.info("✅ 数据库已就绪。")
                 return
             except Exception:
-                logger.warning("⚠️ 检测到损坏的数据库文件，准备重新构建...")
+                logger.warning("⚠️ 检测到损坏的数据库文件，准备重新获取...")
                 os.remove(str(self.db_file))
 
-        # 检查 JSON 数据源
+        # 优先：从本地 JSON 构建
         data_path = self.data_dir
-        if not os.path.isdir(data_path) or not any(f.endswith('.json') for f in os.listdir(data_path)):
-            logger.warning(f"⚠️ 数据目录为空或不存在: {data_path}")
-            logger.info("请从以下地址下载诗词数据到插件 data/ 目录:")
-            logger.info("  https://github.com/sfw2099/astrbot_plugin_poetry_games/releases/tag/data-v3.0.0")
-            return
+        if os.path.isdir(data_path) and any(f.endswith('.json') for f in os.listdir(data_path)):
+            json_files = [f for f in os.listdir(data_path) if f.endswith('.json')]
+            logger.info(f"📊 检测到 {len(json_files)} 个数据文件，开始构建数据库 (约需 2-5 分钟)...")
+            try:
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(None, build_database, data_path, str(self.db_file))
+                self.db = PoetryDB(str(self.db_file))
+                db_size_mb = os.path.getsize(str(self.db_file)) / (1024 * 1024)
+                logger.info(f"✅ 数据库构建成功 ({db_size_mb:.0f} MB)")
+                return
+            except Exception as e:
+                logger.error(f"❌ 数据库构建失败: {e}")
 
-        json_files = [f for f in os.listdir(data_path) if f.endswith('.json')]
-
-        logger.info(f"📊 检测到 {len(json_files)} 个数据文件，开始构建数据库 (约需 2-5 分钟)...")
+        # 备选：下载预构建的 poetry_data.zip
+        logger.info(f"📡 未检测到本地数据，正在下载预构建数据库 (约 366MB)...")
+        logger.info(f"  (可通过安装 data-v3.0.0 Release 中的 JSON 到 data/ 目录跳过此步骤)")
         try:
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, build_database, data_path, str(self.db_file))
+            import aiohttp
+            import zipfile
+            import io
+
+            async with aiohttp.ClientSession() as session:
+                async with session.get(self.db_release_url, timeout=aiohttp.ClientTimeout(total=1800)) as resp:
+                    if resp.status != 200:
+                        logger.error(f"❌ 下载失败，状态码: {resp.status}")
+                        return
+                    total_size = int(resp.headers.get('Content-Length', 0))
+                    downloaded = 0
+                    chunks = []
+                    async for chunk in resp.content.iter_chunked(262144):
+                        chunks.append(chunk)
+                        downloaded += len(chunk)
+                        if total_size > 0 and downloaded % (20 * 1024 * 1024) < 262144:
+                            pct = int(downloaded / total_size * 100)
+                            mb = downloaded / (1024 * 1024)
+                            logger.info(f"  ⏳ {pct}% ({mb:.0f}MB / {total_size/(1024*1024):.0f}MB)")
+
+            data = b''.join(chunks)
+            logger.info("📦 正在解压...")
+            with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                zf.extractall(str(self.plugin_data_dir))
             self.db = PoetryDB(str(self.db_file))
             db_size_mb = os.path.getsize(str(self.db_file)) / (1024 * 1024)
-            logger.info(f"✅ 数据库构建成功 ({db_size_mb:.0f} MB)")
+            logger.info(f"✅ 数据库下载并解压完成 ({db_size_mb:.0f} MB)")
         except Exception as e:
-            logger.error(f"❌ 数据库构建失败: {e}")
+            logger.error(f"❌ 数据库下载失败: {e}")
+            logger.info("手动下载: 将 poetry_data.zip 中的 poetry_data.db 放入插件数据目录")
 
     # ==========================================
     # 基础信息检索 (通用指令)
