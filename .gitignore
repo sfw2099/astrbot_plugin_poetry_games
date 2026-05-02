@@ -207,7 +207,6 @@ marimo/_lsp/
 __marimo__/
 
 # Poetry data files (too large for git, managed separately)
-data/*.json
 data/*.db
 data/*.sqlite
 *.db
