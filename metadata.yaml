@@ -1,6 +1,6 @@
 name: astrbot_plugin_poetry_games
 display_name: 诗词游戏
-desc: AstrBot 诗词游戏插件 - 飞花�?纵横飞花�?蛇形飞花�?AI Bot
+desc: AstrBot poetry game plugin - Feihualing/Crossword/Snake/AI Bot
 version: v3.2.1
 author: ALin
 repo: https://github.com/sfw2099/astrbot_plugin_poetry_games

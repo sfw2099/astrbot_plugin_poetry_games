@@ -540,6 +540,7 @@ class PoetryPlugin(Star):
                     await asyncio.sleep(_random.uniform(2, 4))
                     if session_id not in self.active_games: break
                     try:
+                        engine = self.active_games[session_id]
                         bot_resp = engine.bot_play()
                         if bot_resp and bot_resp.get("msg"):
                             await self.context.send_message(msg_origin, MessageChain([Plain(bot_resp["msg"])]))
@@ -547,9 +548,13 @@ class PoetryPlugin(Star):
                             await self.context.send_message(msg_origin, MessageChain([Image.fromFileSystem(bot_resp["image"])]))
                     except Exception as e:
                         logger.error(f"🤖 Bot 操作失败: {e}")
-                        engine.next_turn()
-                        engine.update_activity()
-                        engine.save_state()
+                        engine = self.active_games.get(session_id)
+                        if engine:
+                            engine.next_turn()
+                            engine.update_activity()
+                            engine.save_state()
+                    # Bot 行动后冷却，避免死循环
+                    await asyncio.sleep(3)
                     continue
 
                 is_timeout, action, msg = engine.check_active_timeout()
