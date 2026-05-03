@@ -1,14 +1,12 @@
 {
-  "timeout_seconds": {
-    "description": "飞花令限时（秒）",
-    "type": "int",
-    "hint": "每轮飞花令的限时，默认 90 秒。超时未接龙将自动跳过或结束游戏。",
-    "default": 90
-  },
-  "proxy_urls": {
-    "description": "数据库下载代理列表",
-    "type": "text",
-    "hint": "poetry_data.zip 的下载地址，每行一个。启动时自动探测延迟选最快。gitee:// 前缀表示分片下载（4 个 .part）。留空使用内置列表。\n内置: gitee://alin1031/poetry-data (国内优先) + github.com 直链 + gh.ddlc.top + ghproxy.net",
-    "default": "gitee://alin1031/poetry-data/releases/download/v1.0.0/poetry_data.zip\nhttps://github.com/sfw2099/astrbot_plugin_poetry_games/releases/download/data-v3.0.0/poetry_data.zip\nhttps://gh.ddlc.top/https://github.com/sfw2099/astrbot_plugin_poetry_games/releases/download/data-v3.0.0/poetry_data.zip\nhttps://ghproxy.net/https://github.com/sfw2099/astrbot_plugin_poetry_games/releases/download/data-v3.0.0/poetry_data.zip"
-  }
+    "flowing_timeout": {
+        "title": "衔字飞花令超时时间(秒)",
+        "type": "int",
+        "default": 60
+    },
+    "crossword_timeout": {
+        "title": "纵横飞花令超时时间(秒)",
+        "type": "int",
+        "default": 90
+    }
 }
