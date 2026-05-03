@@ -1,5 +1,6 @@
 import os
 import asyncio
+import aiohttp  # noqa: F401 - used in _install_db at runtime
 import json
 import time
 
@@ -12,72 +13,165 @@ from .database import PoetryDB
 from .game.flowing_petals import FlowingPetalsEngine
 from .game.crossword_poetry import PoetryCrosswordEngine
 
+GITEE_BASE = "https://gitee.com/alin1031/poetry-data/releases/download/v1.0.0/poetry_data.zip"
+GITEE_PARTS = 4
+
+GITHUB_ZIP = "https://github.com/sfw2099/astrbot_plugin_poetry_games/releases/download/data-v3.0.0/poetry_data.zip"
+
+PROXY_URLS = [
+    GITEE_BASE,       # Gitee 分片（国内优先）
+    GITHUB_ZIP,       # GitHub 直链
+    "https://gh.ddlc.top/" + GITHUB_ZIP,
+    "https://ghproxy.net/" + GITHUB_ZIP,
+]
+
+PROBE_TIMEOUT = 10  # 每源探测超时秒数
+
+
 @register("astrbot_plugin_poetry_games", "ALin", "诗词游戏引擎", "3.5.0")
 class PoetryPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
-        
-        # 获取标准数据目录
+
         self.plugin_data_dir = StarTools.get_data_dir("astrbot_plugin_poetry_games")
         self.plugin_data_dir.mkdir(parents=True, exist_ok=True)
         self.db_file = self.plugin_data_dir / 'poetry_data.db'
-        
-        # 存档目录配置
+
         self.saves_dir = self.plugin_data_dir / 'saves'
         self.saves_dir.mkdir(parents=True, exist_ok=True)
-        
+
         self.db = None
-        
-        # 后台监视超时
         self.active_games = {}
         self.timeout_tasks = {}
         self.flowing_timeout = self.config.get("flowing_timeout", 90)
         self.crossword_timeout = self.config.get("crossword_timeout", 90)
-        
-        # 异步启动准备任务
-        asyncio.create_task(self.prepare_database())
 
-    async def _active_timeout_monitor(self, session_id, msg_origin):
-        try:
-            while session_id in self.active_games:
-                await asyncio.sleep(2)
-                if session_id not in self.active_games: break
-                
-                engine = self.active_games[session_id]
-                is_timeout, action, msg = engine.check_active_timeout()
-                
-                if is_timeout:
-                    chain = [Plain(msg)]
-                    if action == "end":
-                        del self.active_games[session_id]
-                        await self.context.send_message(msg_origin, MessageChain(chain))
-                        break
-                    elif action == "skip":
-                        if hasattr(engine, "render_image"):
-                            chain.append(Image.fromFileSystem(engine.render_image()))
-                        elif hasattr(engine, "get_status_str"):
-                            chain.append(Plain("\n" + engine.get_status_str()))
-                        await self.context.send_message(msg_origin, MessageChain(chain))
-        except Exception as e:
-            logger.error(f" 飞花令超时监控任务崩溃: {e}")
-
-    async def prepare_database(self):
-        """检查数据库：已存在则加载，否则提示上传"""
+    def _ensure_db(self):
+        """惰性加载数据库"""
+        if self.db is not None:
+            return True
         if self.db_file.exists() and self.db_file.stat().st_size > 0:
             try:
                 self.db = PoetryDB(str(self.db_file))
-                db_size_mb = os.path.getsize(str(self.db_file)) / (1024 * 1024)
-                logger.info(f"✅ 数据库已就绪 ({db_size_mb:.0f} MB)")
-                return
+                return True
             except Exception:
-                logger.warning("⚠️ 检测到损坏的数据库文件，已删除，请重新上传。")
                 os.remove(str(self.db_file))
-                return
+        return False
 
-        logger.warning(f"📂 数据库文件未找到！")
-        logger.warning(f"💡 请将 poetry_data.db 上传到: {self.plugin_data_dir}")
-        logger.warning(f"💡 下载地址: https://github.com/sfw2099/poetry-dataset")
+    # ==========================================
+    # 🔽 安装数据库指令
+    # ==========================================
+    @filter.command("安装数据库")
+    async def _install_db(self, event: AstrMessageEvent):
+        if self._ensure_db():
+            db_size_mb = os.path.getsize(str(self.db_file)) / (1024 * 1024)
+            yield event.plain_result(f"✅ 数据库已就绪 ({db_size_mb:.0f} MB)，无需重复安装。")
+            return
+
+        yield event.plain_result("🔍 正在探测下载源...")
+
+        candidates = []
+        async with aiohttp.ClientSession() as session:
+            for i, url in enumerate(PROXY_URLS):
+                label = f"源{i+1}"
+                t0 = time.monotonic()
+                try:
+                    async with session.head(url, timeout=aiohttp.ClientTimeout(total=PROBE_TIMEOUT),
+                                             allow_redirects=True) as resp:
+                        if resp.status == 200:
+                            elapsed = time.monotonic() - t0
+                            clen = int(resp.headers.get('Content-Length', 0))
+                            candidates.append((url, elapsed, clen, label))
+                except Exception:
+                    pass
+
+        if not candidates:
+            yield event.plain_result(
+                "❌ 所有下载源均不可达。\n\n"
+                "📥 请手动下载并上传：\n"
+                f"{GITHUB_ZIP}\n"
+                "解压后放入: " + str(self.plugin_data_dir)
+            )
+            return
+
+        candidates.sort(key=lambda x: x[1])
+        lines = ["📡 下载源测速结果："]
+        for i, (url, elapsed, clen, label) in enumerate(candidates):
+            mb = clen / (1024 * 1024) if clen > 0 else 0
+            sz = f"{mb:.0f}MB" if mb > 0 else "?"
+            lines.append(f"  {i+1}. {elapsed:.1f}s  {sz}  {label}")
+        yield event.plain_result("\n".join(lines))
+
+        best_url, best_elapsed, _, best_label = candidates[0]
+        yield event.plain_result(f"⬇️ 选用 {best_label} ({best_elapsed:.1f}s)，开始下载...")
+
+        # ---- download ----
+        try:
+            if best_url == GITEE_BASE:
+                await self._download_gitee(event)
+            else:
+                await self._download_zip(event, best_url)
+
+            self.db = PoetryDB(str(self.db_file))
+            db_size_mb = os.path.getsize(str(self.db_file)) / (1024 * 1024)
+            yield event.plain_result(f"✅ 数据库安装完成 ({db_size_mb:.0f} MB)，可以开始游戏了！")
+        except Exception as e:
+            logger.error(f"下载失败: {e}")
+            yield event.plain_result(f"❌ 下载失败: {e}\n请手动下载: {GITHUB_ZIP}")
+
+    async def _download_gitee(self, event: AstrMessageEvent):
+        """下载 Gitee 4 个分片，合并解压"""
+        import zipfile
+        import io
+        all_data = bytearray()
+        async with aiohttp.ClientSession() as session:
+            for i in range(1, GITEE_PARTS + 1):
+                part_url = f"{GITEE_BASE}.part{i:02d}"
+                yield event.plain_result(f"  [{i}/{GITEE_PARTS}] 下载中...")
+                t0 = time.monotonic()
+                async with session.get(part_url, timeout=aiohttp.ClientTimeout(total=600)) as resp:
+                    if resp.status != 200:
+                        raise Exception(f"分片 {i} HTTP {resp.status}")
+                    chunk = await resp.read()
+                    all_data.extend(chunk)
+                mb = len(chunk) / (1024 * 1024)
+                elapsed = time.monotonic() - t0
+                yield event.plain_result(f"  [{i}/{GITEE_PARTS}] ✓ {mb:.0f}MB ({elapsed:.0f}s)")
+
+        yield event.plain_result("📦 正在合并解压...")
+        with zipfile.ZipFile(io.BytesIO(bytes(all_data))) as zf:
+            zf.extractall(str(self.plugin_data_dir))
+
+    async def _download_zip(self, event: AstrMessageEvent, url):
+        """下载单个 zip 文件，带进度"""
+        import zipfile
+        import io
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=1800)) as resp:
+                if resp.status != 200:
+                    raise Exception(f"HTTP {resp.status}")
+                total_size = int(resp.headers.get('Content-Length', 0))
+                downloaded = 0
+                chunks = []
+                last_report_time = time.monotonic()
+
+                async for chunk in resp.content.iter_chunked(262144):
+                    chunks.append(chunk)
+                    downloaded += len(chunk)
+                    if total_size > 0 and (time.monotonic() - last_report_time) >= 5:
+                        pct = int(downloaded / total_size * 100)
+                        yield event.plain_result(
+                            f"  ⏳ {pct}% ({downloaded/(1024*1024):.0f}/{total_size/(1024*1024):.0f} MB)")
+                        last_report_time = time.monotonic()
+
+                if total_size > 0 and downloaded < total_size * 0.9:
+                    raise Exception("下载不完整")
+
+        yield event.plain_result("📦 正在解压...")
+        data = b''.join(chunks)
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            zf.extractall(str(self.plugin_data_dir))
 
     # ==========================================
     # 🌟 核心修复：多存档列表获取助手
@@ -85,7 +179,7 @@ class PoetryPlugin(Star):
     def get_saves(self, session_id):
         saves = []
         if not os.path.exists(str(self.saves_dir)): return saves
-        
+
         for f in os.listdir(str(self.saves_dir)):
             if f.startswith(f"game_{session_id}_") and f.endswith(".json"):
                 path = os.path.join(str(self.saves_dir), f)
@@ -101,7 +195,6 @@ class PoetryPlugin(Star):
                             "mtime": os.path.getmtime(path)
                         })
                 except: pass
-        # 按最后修改时间倒序排列（最近玩的排最前面）
         saves.sort(key=lambda x: x["mtime"], reverse=True)
         return saves
 
@@ -110,57 +203,49 @@ class PoetryPlugin(Star):
     # ==========================================
     @filter.command("查询诗句")
     async def find_sentence(self, event: AstrMessageEvent, sentence: str):
-        if not self.db: 
-            yield event.plain_result("数据库正在赶来（首次运行下载中），请稍后再试...")
+        if not self._ensure_db():
+            yield event.plain_result("⏳ 数据库未安装，请发送 /安装数据库")
             return
-            
         results = self.db.search_by_sentence(sentence)
         exact_list = results.get("exact", [])
         fuzzy_list = results.get("fuzzy", [])
-        
         if not exact_list and not fuzzy_list:
-            yield event.plain_result(f"未找到包含“{sentence}”的诗词。")
+            yield event.plain_result(f"未找到包含「{sentence}」的诗词。")
             return
-            
-        resp = [f" 查询结果：【{sentence}】\n" + "="*15]
+        resp = [f"📖 查询结果：【{sentence}】\n" + "="*15]
         if exact_list:
-            resp.append(" [完全一致的单句]：")
+            resp.append("🎯 [完全一致的单句]：")
             for title, author, dynasty in exact_list:
                 resp.append(f" • [{dynasty}] {author} —— 《{title}》")
             resp.append("")
-            
         if fuzzy_list:
-            resp.append(" [包含该片段的诗词] (模糊匹配)：")
+            resp.append("🔍 [包含该片段的诗词] (模糊匹配)：")
             for title, author, dynasty in fuzzy_list:
                 resp.append(f" • [{dynasty}] {author} —— 《{title}》")
-                
         yield event.plain_result("\n".join(resp).strip())
 
     @filter.command("查询诗词")
     async def find_full_poem(self, event: AstrMessageEvent, title_kw: str, author_kw: str = ""):
-        if not self.db: return
+        if not self._ensure_db():
+            yield event.plain_result("⏳ 数据库未安装，请发送 /安装数据库")
+            return
         results = self.db.get_poem_by_title(title_kw, author_kw)
-        
         if not results:
             if author_kw:
-                yield event.plain_result(f"未找到标题包含“{title_kw}”，且作者包含“{author_kw}”的诗词。")
+                yield event.plain_result(f"未找到标题包含「{title_kw}」，且作者包含「{author_kw}」的诗词。")
             else:
-                yield event.plain_result(f"未找到标题包含“{title_kw}”的诗词。")
+                yield event.plain_result(f"未找到标题包含「{title_kw}」的诗词。")
             return
-            
         MAX_DISPLAY = 3
         total_count = len(results)
         display_results = results[:MAX_DISPLAY]
-        
         resp = [f"检索到 {total_count} 首相关诗词" + (f"（仅展示前 {MAX_DISPLAY} 首）" if total_count > MAX_DISPLAY else "") + "：\n" + "="*20]
         for i, (title, author, dynasty, content) in enumerate(display_results):
             clean_content = content.replace('\r\n', '\n').strip()
             resp.append(f"《{title}》\n作者：[{dynasty}] {author}\n\n{clean_content}")
             if i < len(display_results) - 1: resp.append("-" * 15)
-            
         if total_count > MAX_DISPLAY:
             resp.append(f"\n...\n(搜索结果过多，为防刷屏已截断。请加上作者名精确查询，如：/查询诗词 {title_kw} 纳兰性德)")
-            
         yield event.plain_result("\n".join(resp))
 
     # ==========================================
@@ -168,43 +253,37 @@ class PoetryPlugin(Star):
     # ==========================================
     @filter.command("衔字飞花令")
     async def start_flowing(self, event: AstrMessageEvent):
-        if not self.db:
-            yield event.plain_result(" 数据库加载中，请稍后再试...")
+        if not self._ensure_db():
+            yield event.plain_result("⏳ 数据库未安装，请发送 /安装数据库")
             return
-            
         session_id = str(event.get_group_id() or event.get_session_id())
         if session_id in self.active_games:
             yield event.plain_result("当前群聊已有游戏正在进行！请先【结束游戏】")
             return
-            
         engine = FlowingPetalsEngine(session_id, self.db, str(self.saves_dir), timeout_seconds=self.flowing_timeout)
         self.active_games[session_id] = engine
-        
         if session_id in self.timeout_tasks: self.timeout_tasks[session_id].cancel()
         self.timeout_tasks[session_id] = asyncio.create_task(self._active_timeout_monitor(session_id, event.unified_msg_origin))
-        
-        yield event.plain_result(f" 【衔字飞花令】已建立新对局！\n限时：{self.flowing_timeout}秒。第一位发送【加入】的玩家即可开始。")
+        yield event.plain_result(f"🌸 【衔字飞花令】已建立新对局！\n限时：{self.flowing_timeout}秒。第一位发送【加入】的玩家即可开始。")
 
     @filter.command("纵横飞花令")
     async def start_crossword(self, event: AstrMessageEvent, width: int = 24, height: int = 24):
-        if not (8 <= width <= 40) or not (8 <= height <= 40):
-            yield event.plain_result(" 棋盘宽和高必须在 8 到 40 之间！")
+        if not self._ensure_db():
+            yield event.plain_result("⏳ 数据库未安装，请发送 /安装数据库")
             return
-            
+        if not (8 <= width <= 40) or not (8 <= height <= 40):
+            yield event.plain_result("📐 棋盘宽和高必须在 8 到 40 之间！")
+            return
         session_id = str(event.get_group_id() or event.get_session_id())
         if session_id in self.active_games:
             yield event.plain_result("当前群聊已有游戏正在进行！请先【结束游戏】")
             return
-            
         engine = PoetryCrosswordEngine(session_id, self.db, str(self.saves_dir), width=width, height=height, timeout_seconds=self.crossword_timeout)
         self.active_games[session_id] = engine
-        
         if session_id in self.timeout_tasks: self.timeout_tasks[session_id].cancel()
         self.timeout_tasks[session_id] = asyncio.create_task(self._active_timeout_monitor(session_id, event.unified_msg_origin))
-        
         start_verse_info = engine.state["history"][0] if engine.state["history"] else "随机开局"
-        yield event.plain_result(f" 【纵横飞花令】已建立新对局！({width}x{height}棋盘，限时{self.crossword_timeout}秒)\n系统已随机落下首句：{start_verse_info}\n请发送【加入】参与。")
-        
+        yield event.plain_result(f"🌟 【纵横飞花令】已建立新对局！({width}x{height}棋盘，限时{self.crossword_timeout}秒)\n系统已随机落下首句：{start_verse_info}\n请发送【加入】参与。")
         if hasattr(engine, "render_image"):
             yield event.image_result(engine.render_image())
 
@@ -217,49 +296,41 @@ class PoetryPlugin(Star):
         if session_id in self.active_games:
             yield event.plain_result("当前已有进行中的游戏，请先【结束游戏】。")
             return
-            
         saves = self.get_saves(session_id)
         if not saves:
             yield event.plain_result("未找到该群的任何游戏存档。")
             return
-            
-        # 没带数字：返回列表
         if not arg or not arg.isdigit():
-            msg = [f" 发现 {len(saves)} 个存档，请发送 /恢复游戏 [序号] 来选择：", "-"*15]
+            msg = [f"📂 发现 {len(saves)} 个存档，请发送 /恢复游戏 [序号] 来选择：", "-"*15]
             for i, s in enumerate(saves, 1):
                 gtype = "纵横" if "Crossword" in s["type"] else "衔字"
                 msg.append(f"[{i}] {gtype}飞花令 | 建于: {s['start_time']} | 进度: {s['turn_count']}回合")
             yield event.plain_result("\n".join(msg))
             return
-            
         index = int(arg)
         if index < 1 or index > len(saves):
-            yield event.plain_result(" 无效的存档序号。")
+            yield event.plain_result("❌ 无效的存档序号。")
             return
-            
         target_save = saves[index-1]
         filename = target_save["filename"]
-        
         if "Crossword" in target_save["type"]:
             engine = PoetryCrosswordEngine(session_id, self.db, str(self.saves_dir), save_filename=filename)
         else:
             engine = FlowingPetalsEngine(session_id, self.db, str(self.saves_dir), save_filename=filename)
-            
         try:
             if engine.load_state():
                 self.active_games[session_id] = engine
                 if session_id in self.timeout_tasks: self.timeout_tasks[session_id].cancel()
                 self.timeout_tasks[session_id] = asyncio.create_task(self._active_timeout_monitor(session_id, event.unified_msg_origin))
-                
-                yield event.plain_result(f" 存档 [{index}] 恢复成功！游戏继续。")
+                yield event.plain_result(f"💾 存档 [{index}] 恢复成功！游戏继续。")
                 if "Crossword" in target_save["type"] and hasattr(engine, "render_image"):
                     yield event.image_result(engine.render_image())
                 elif "Flowing" in target_save["type"] and hasattr(engine, "get_status_str"):
                     yield event.plain_result(engine.get_status_str())
             else:
-                yield event.plain_result(" 存档文件读取失败。")
+                yield event.plain_result("❌ 存档文件读取失败。")
         except Exception as e:
-            yield event.plain_result(f" 恢复失败: {e}")
+            yield event.plain_result(f"❌ 恢复失败: {e}")
 
     @filter.command("删除存档")
     async def delete_save(self, event: AstrMessageEvent, arg: str = ""):
@@ -268,7 +339,6 @@ class PoetryPlugin(Star):
         if not saves:
             yield event.plain_result("未找到该群的任何游戏存档。")
             return
-            
         if not arg or not arg.isdigit():
             msg = [f"🗑 发现 {len(saves)} 个存档，请发送 /删除存档 [序号] 来永久删除：", "-"*15]
             for i, s in enumerate(saves, 1):
@@ -276,18 +346,16 @@ class PoetryPlugin(Star):
                 msg.append(f"[{i}] {gtype}飞花令 | 建于: {s['start_time']} | 进度: {s['turn_count']}回合")
             yield event.plain_result("\n".join(msg))
             return
-            
         index = int(arg)
         if index < 1 or index > len(saves):
-            yield event.plain_result(" 无效的存档序号。")
+            yield event.plain_result("❌ 无效的存档序号。")
             return
-            
         target_save = saves[index-1]
         try:
             os.remove(target_save["path"])
-            yield event.plain_result(f" 存档 [{index}] 已成功删除！")
+            yield event.plain_result(f"🗑 存档 [{index}] 已成功删除！")
         except Exception as e:
-            yield event.plain_result(f" 删除失败: {e}")
+            yield event.plain_result(f"❌ 删除失败: {e}")
 
     @filter.command("生成战报")
     async def generate_report(self, event: AstrMessageEvent):
@@ -296,7 +364,6 @@ class PoetryPlugin(Star):
         if not engine:
             yield event.plain_result("当前没有进行中的游戏。如果要生成旧战报，请先【恢复游戏】。")
             return
-            
         yield event.plain_result(engine.generate_text_report())
         if hasattr(engine, "render_image"):
             yield event.image_result(engine.render_image())
@@ -306,7 +373,7 @@ class PoetryPlugin(Star):
         session_id = str(event.get_group_id() or event.get_session_id())
         if session_id in self.active_games:
             engine = self.active_games.pop(session_id)
-            yield event.plain_result(" 游戏已结束。最后战果：\n" + engine.generate_text_report())
+            yield event.plain_result("⏹️ 游戏已结束。最后战果：\n" + engine.generate_text_report())
         else:
             yield event.plain_result("当前没有正在进行的游戏。")
 
@@ -316,14 +383,13 @@ class PoetryPlugin(Star):
     @filter.command("飞花令帮助")
     async def poetry_help(self, event: AstrMessageEvent, topic: str = ""):
         topic = topic.strip()
-        
-        # 1. 玩家未提供具体目录，发送总览菜单
+
         if not topic:
             msg = (
-                " 【诗词游戏引擎】帮助指南\n"
+                "📖 【诗词游戏引擎】帮助指南\n"
                 "====================\n"
                 "欢迎使用本插件！请发送【/飞花令帮助 目录名】（或直接打数字）查看详情：\n\n"
-                " 目录列表：\n"
+                "📋 目录列表：\n"
                 "1. /飞花令帮助 衔字规则  (衔字飞花令玩法说明)\n"
                 "2. /飞花令帮助 纵横规则  (纵横飞花令玩法说明)\n"
                 "3. /飞花令帮助 基础查询  (查诗词/查诗句指令)\n"
@@ -333,10 +399,9 @@ class PoetryPlugin(Star):
             yield event.plain_result(msg)
             return
 
-        # 2. 玩家请求具体目录，发送详情说明
         if topic in ["1", "衔字规则", "衔字"]:
             msg = (
-                " 【衔字飞花令】规则说明\n"
+                "🌸 【衔字飞花令】规则说明\n"
                 "--------------------\n"
                 "1. 玩家需接上一个人发送诗句的【任意一个字】。\n"
                 "2. 必须是一整句完整的古诗，且至少需要 4 个字。\n"
@@ -346,7 +411,7 @@ class PoetryPlugin(Star):
             )
         elif topic in ["2", "纵横规则", "纵横"]:
             msg = (
-                " 【纵横飞花令】规则说明\n"
+                "🌟 【纵横飞花令】规则说明\n"
                 "--------------------\n"
                 "1. 在棋盘上拼字！发送一句完整的诗（至少4字），该诗必须包含棋盘上已有的字，从而产生交叉。\n"
                 "2. 绝对去重：棋盘上已经存在过的诗句，绝对不可以再发第二遍。\n"
@@ -355,7 +420,7 @@ class PoetryPlugin(Star):
             )
         elif topic in ["3", "基础查询", "查询"]:
             msg = (
-                " 【基础查询】指令说明\n"
+                "📚 【基础查询】指令说明\n"
                 "--------------------\n"
                 "• /查询诗词 [诗词名] [作者(可选)]\n"
                 "  例如：「/查询诗词 望庐山瀑布 李白」，精确匹配作者，有效避免同名诗词干扰。\n\n"
@@ -364,7 +429,7 @@ class PoetryPlugin(Star):
             )
         elif topic in ["4", "游戏管理", "管理", "指令"]:
             msg = (
-                " 【游戏管理】全指令说明\n"
+                "⚙️ 【游戏管理】全指令说明\n"
                 "--------------------\n"
                 "【建局指令】\n"
                 "• /衔字飞花令\n"
@@ -379,9 +444,33 @@ class PoetryPlugin(Star):
                 "• /结束游戏：立即清算总分并解散游戏。"
             )
         else:
-            msg = " 未知的帮助目录。请直接发送 /飞花令帮助 查看可选的数字或目录名。"
-            
+            msg = "❓ 未知的帮助目录。请直接发送 /飞花令帮助 查看可选的数字或目录名。"
         yield event.plain_result(msg)
+
+    # ==========================================
+    # 超时监控
+    # ==========================================
+    async def _active_timeout_monitor(self, session_id, msg_origin):
+        try:
+            while session_id in self.active_games:
+                await asyncio.sleep(2)
+                if session_id not in self.active_games: break
+                engine = self.active_games[session_id]
+                is_timeout, action, msg = engine.check_active_timeout()
+                if is_timeout:
+                    chain = [Plain(msg)]
+                    if action == "end":
+                        del self.active_games[session_id]
+                        await self.context.send_message(msg_origin, MessageChain(chain))
+                        break
+                    elif action == "skip":
+                        if hasattr(engine, "render_image"):
+                            chain.append(Image.fromFileSystem(engine.render_image()))
+                        elif hasattr(engine, "get_status_str"):
+                            chain.append(Plain("\n" + engine.get_status_str()))
+                        await self.context.send_message(msg_origin, MessageChain(chain))
+        except Exception as e:
+            logger.error(f"⏱ 飞花令超时监控任务崩溃: {e}")
 
     # ==========================================
     # 全局监听分发中枢
@@ -390,7 +479,7 @@ class PoetryPlugin(Star):
     async def handle_recv_msg(self, event: AstrMessageEvent):
         msg_raw = event.message_str.strip()
         if msg_raw.startswith(("(", "（")) and msg_raw.endswith((")", "）")): return
-        if not msg_raw or msg_raw.startswith(("/", "查询", "生成战报", "恢复", "结束", "纵横", "衔字", "删除")): return
+        if not msg_raw or msg_raw.startswith(("/", "查询", "生成战报", "恢复", "结束", "纵横", "衔字", "删除", "安装")): return
 
         session_id = str(event.get_group_id() or event.get_session_id())
         if session_id not in self.active_games: return
@@ -407,9 +496,8 @@ class PoetryPlugin(Star):
             response = engine.step("skip", user_id, user_name)
         else:
             response = engine.step("play", user_id, user_name, msg_raw)
-            
+
         if not response: return
-        
         if response.get("status") == "ignore": return
         if response.get("msg"): yield event.plain_result(response["msg"])
         if "image" in response: yield event.image_result(response["image"])
