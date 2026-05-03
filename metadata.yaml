@@ -1,6 +1,6 @@
 name: astrbot_plugin_poetry_games
 display_name: 诗词游戏引擎
 desc: 飞花令/纵横飞花令/蛇形飞花令/AI Bot对战 - 内置119万首诗词数据库
-version: v3.2.3
+version: v3.2.4
 author: ALin
 repo: https://github.com/sfw2099/astrbot_plugin_poetry_games
