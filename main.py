@@ -646,6 +646,8 @@ class PoetryPlugin(Star):
         msg_raw = event.message_str.strip()
         if msg_raw.startswith(("(", "（")) and msg_raw.endswith((")", "）")): return
         if not msg_raw or msg_raw.startswith(("/", "查询", "生成战报", "恢复", "结束", "纵横", "衔字", "蛇形", "删除", "安装", "bot")): return
+        # 显式排除猜诗句相关指令词，避免被当作猜测
+        if msg_raw in ("猜诗句", "猜诗句帮助", "结束猜诗句", "猜诗句规则") or msg_raw.startswith("猜诗句 "): return
 
         session_id = str(event.get_group_id() or event.get_session_id())
 

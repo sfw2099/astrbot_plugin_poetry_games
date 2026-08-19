@@ -81,6 +81,24 @@ class PoetryDB:
                     return (title, author, dynasty)
         return None
 
+    def is_complete_sentence(self, text):
+        """判断输入是否为数据库中的完整诗句（合规校验用）。"""
+        clean_text = re.sub(r'[^\u4e00-\u9fa5]', '', text)
+        if len(clean_text) < 2:
+            return False
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT content FROM poems WHERE content LIKE ? LIMIT 50", (f'%{clean_text}%',))
+                for (content,) in cursor.fetchall():
+                    sentences = re.split(r'[，。！？\n\r\s、；：]+', content)
+                    pure_sentences = [re.sub(r'[^\u4e00-\u9fa5]', '', s) for s in sentences if s]
+                    if clean_text in pure_sentences:
+                        return True
+        except Exception:
+            return False
+        return False
+
     def get_random_verse(self, min_len=5, max_len=10, target_count=8, max_scan=200):
         """随机抽取若干条指定长度范围的完整诗句，返回 [(句子, 标题, 作者, 朝代)]"""
         import random
