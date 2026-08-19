@@ -195,21 +195,22 @@ class GuessVerseEngine:
 
 # ============ 渲染 ============
 
-CELL_W, CELL_H = 160, 185
+CELL_W, CELL_H = 160, 170
 GAP = 8
 PAD = 40
 HEADER_H = 85
 FOOTER_H = 70
 
-# (bg, text) — 白底黑字 + 淡色状态背景
-COLOR_MAP = {
-    "correct": ((214, 240, 214), (30, 30, 30)),      # 淡绿
-    "present": ((255, 232, 190), (30, 30, 30)),      # 淡橙
-    "absent": ((228, 228, 230), (30, 30, 30)),       # 淡灰
-    "empty": ((248, 248, 250), (170, 170, 175)),     # 白
-    "default": ((255, 255, 255), (30, 30, 30)),
+# 纯白底 + 黑线框，用文字颜色区分状态
+CELL_BG = (255, 255, 255)
+BORDER_COLOR = (0, 0, 0)
+STATUS_COLOR = {
+    "correct": (0, 150, 40),      # 绿
+    "present": (230, 110, 0),     # 橙
+    "absent": (160, 160, 160),    # 灰
+    "empty": (200, 200, 205),     # 空格
+    "default": (30, 30, 30),      # 黑
 }
-BORDER_COLOR = (20, 20, 20)
 
 _FONT_PATH = None
 _PLUGIN_DIR = None
@@ -248,6 +249,33 @@ def _get_font(size):
     return ImageFont.load_default()
 
 
+def _text_width(draw, text, font):
+    # 用 textlength 精确测量渲染宽度（含 kerning），避免拼接错位
+    try:
+        return draw.textlength(text, font=font)
+    except Exception:
+        bbox = draw.textbbox((0, 0), text, font=font)
+        return bbox[2] - bbox[0]
+
+
+def _draw_pinyin_joined(draw, x_center, y_mid, segments):
+    """把拼音各部件拼成整体显示，精确贴合、垂直中线对齐、分段独立着色。
+
+    segments: [(text, color, font, gap_before), ...]
+    y_mid: 垂直中线坐标，每段用 anchor='lm' 对齐到同一中线。
+    """
+    if not segments:
+        return
+    gaps = [seg[3] if len(seg) > 3 else 0 for seg in segments]
+    total_w = sum(_text_width(draw, seg[0], seg[2]) for seg in segments) + sum(gaps)
+    cur_x = x_center - total_w // 2
+    for i, seg in enumerate(segments):
+        text, color, font = seg[0], seg[1], seg[2]
+        cur_x += gaps[i]
+        draw.text((cur_x, y_mid), text, fill=color, font=font, anchor="lm")
+        cur_x += _text_width(draw, text, font)
+
+
 def render_grid(engine, output_path, title="猜诗句", max_attempts=10):
     """渲染游戏网格。列数 = 答案长度。"""
     n_cols = len(engine.target_parts)
@@ -261,8 +289,7 @@ def render_grid(engine, output_path, title="猜诗句", max_attempts=10):
 
     f_title = _get_font(30)
     f_char = _get_font(54)
-    f_py = _get_font(26)
-    f_py_lg = _get_font(30)
+    f_py = _get_font(30)
     f_hint = _get_font(15)
 
     draw.text((img_w // 2, 20), title, fill=(30, 30, 30), font=f_title, anchor="mt")
@@ -277,34 +304,34 @@ def render_grid(engine, output_path, title="猜诗句", max_attempts=10):
             gp = guess_parts[col_idx] if col_idx < len(guess_parts) else None
 
             if cell is None:
-                bg, _ = COLOR_MAP["empty"]
-                draw.rounded_rectangle([x, y, x + CELL_W, y + CELL_H], radius=10, fill=bg, outline=BORDER_COLOR, width=2)
+                draw.rounded_rectangle([x, y, x + CELL_W, y + CELL_H], radius=10, fill=CELL_BG, outline=BORDER_COLOR, width=2)
                 continue
 
-            bg, _ = COLOR_MAP.get(cell.get("char", "default"), COLOR_MAP["default"])
-            draw.rounded_rectangle([x, y, x + CELL_W, y + CELL_H], radius=10, fill=bg, outline=BORDER_COLOR, width=2)
+            draw.rounded_rectangle([x, y, x + CELL_W, y + CELL_H], radius=10, fill=CELL_BG, outline=BORDER_COLOR, width=2)
 
             ch = gp["char"] if gp else ""
-            ch_color = COLOR_MAP.get(cell.get("char", "default"), (None, (30, 30, 30)))[1]
-            draw.text((x + CELL_W // 2, y + CELL_H // 2 + 5), ch, fill=ch_color, font=f_char, anchor="mm")
+            ch_color = STATUS_COLOR.get(cell.get("char", "default"), STATUS_COLOR["default"])
+            draw.text((x + CELL_W // 2, y + CELL_H // 2), ch, fill=ch_color, font=f_char, anchor="mm")
 
-            # 拼音部件（顶部，与汉字间距缩小）
-            py_y = y + 26
+            # 拼音：拼接为整体文本，各部件独立着色，整体居中
+            py_mid = y + CELL_H // 2 - 46  # 拼音垂直中线（汉字上方，留出间隔）
             if gp:
                 initial = gp.get("initial", "")
                 final = gp.get("final", "")
                 tone = str(gp.get("tone", "")) if gp.get("tone", 0) > 0 else ""
 
-                init_color = COLOR_MAP.get(cell.get("initial", "default"), (None, (30, 30, 30)))[1]
-                final_color = COLOR_MAP.get(cell.get("final", "default"), (None, (30, 30, 30)))[1]
-                tone_color = COLOR_MAP.get(cell.get("tone", "default"), (None, (30, 30, 30)))[1]
+                init_color = STATUS_COLOR.get(cell.get("initial", "default"), STATUS_COLOR["default"])
+                final_color = STATUS_COLOR.get(cell.get("final", "default"), STATUS_COLOR["default"])
+                tone_color = STATUS_COLOR.get(cell.get("tone", "default"), STATUS_COLOR["default"])
 
+                segments = []
                 if initial:
-                    draw.text((x + 12, py_y), initial, fill=init_color, font=f_py, anchor="lt")
+                    segments.append((initial, init_color, f_py))
                 if final:
-                    draw.text((x + CELL_W // 2, py_y), final, fill=final_color, font=f_py_lg, anchor="mt")
+                    segments.append((final, final_color, f_py))
                 if tone:
-                    draw.text((x + CELL_W - 12, py_y), tone, fill=tone_color, font=f_py, anchor="rt")
+                    segments.append((tone, tone_color, f_py, 8))  # 音调前加 8px 间隔
+                _draw_pinyin_joined(draw, x + CELL_W // 2, py_mid, segments)
 
     # 底部：机会和答案长度提示
     remaining = max_attempts - len(engine.history)
