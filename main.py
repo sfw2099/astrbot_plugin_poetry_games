@@ -13,6 +13,7 @@ from .database import PoetryDB
 from .game.flowing_petals import FlowingPetalsEngine
 from .game.crossword_poetry import PoetryCrosswordEngine
 from .game.snake_poetry import PoetrySnakeEngine
+from .game.guess_verse import GuessVerseEngine, render_grid, render_answer, _init_plugin_dir
 
 GITEE_BASE = "https://gitee.com/alin1031/poetry-data/releases/download/v1.0.0/poetry_data.zip"
 GITEE_PROBE = GITEE_BASE + ".part01"  # 探测分片而非基文件（基文件不存在）
@@ -51,6 +52,14 @@ class PoetryPlugin(Star):
         self.flowing_timeout = self.config.get("flowing_timeout", 90)
         self.crossword_timeout = self.config.get("crossword_timeout", 90)
         self.snake_timeout = self.config.get("snake_timeout", 120)
+        self.verse_max_attempts = self.config.get("verse_max_attempts", 10)
+        self.verse_min_len = self.config.get("verse_min_len", 5)
+        self.verse_max_len = self.config.get("verse_max_len", 10)
+        self.guess_verse_sessions = {}
+        try:
+            _init_plugin_dir(os.path.dirname(os.path.abspath(__file__)))
+        except Exception:
+            pass
 
     def _ensure_db(self):
         """惰性加载数据库"""
@@ -320,6 +329,62 @@ class PoetryPlugin(Star):
             yield event.image_result(engine.render_image())
 
     # ==========================================
+    # 🎯 猜诗句游戏
+    # ==========================================
+    @filter.command("猜诗句")
+    async def start_guess_verse(self, event: AstrMessageEvent):
+        if not self._ensure_db():
+            yield event.plain_result("⏳ 数据库未安装，请发送 /安装数据库")
+            return
+        session_id = str(event.get_group_id() or event.get_session_id())
+        if session_id in self.guess_verse_sessions:
+            yield event.plain_result("游戏进行中！发送诗句进行猜测，或发送【结束猜诗句】退出。")
+            return
+
+        engine = GuessVerseEngine(self.db, self.verse_max_attempts, self.verse_min_len, self.verse_max_len)
+        ok, msg = engine.new_game()
+        if not ok:
+            yield event.plain_result(f"❌ 初始化失败：{msg}")
+            return
+
+        self.guess_verse_sessions[session_id] = engine
+        yield event.plain_result(
+            "🎯 【猜诗句】开始！\n"
+            f"答案是一句 {len(engine.target_text)} 字的诗句，你有 {self.verse_max_attempts} 次机会。\n"
+            "每次猜测后，每个字的【汉字/声母/韵母/声调】四个属性独立显示颜色：\n"
+            "🟢 绿色 = 正确且位置正确\n"
+            "🟠 橙色 = 答案中存在但位置错误\n"
+            "⚪ 灰色 = 答案中不存在\n"
+            "发送任意汉字诗句即可猜测（长度可与答案不同）。"
+        )
+
+    @filter.command("结束猜诗句")
+    async def end_guess_verse(self, event: AstrMessageEvent):
+        session_id = str(event.get_group_id() or event.get_session_id())
+        if session_id in self.guess_verse_sessions:
+            engine = self.guess_verse_sessions.pop(session_id)
+            ans_path = os.path.join(str(self.plugin_data_dir), f"verse_ans_{session_id}.png")
+            render_answer(engine, ans_path)
+            yield event.image_result(ans_path)
+            yield event.plain_result(f"游戏结束，正确诗句：{engine.target_text}")
+        else:
+            yield event.plain_result("当前没有进行中的猜诗句游戏。")
+
+    @filter.command("猜诗句帮助")
+    async def guess_verse_help(self, event: AstrMessageEvent):
+        msg = (
+            "🎯 【猜诗句】规则说明\n"
+            "--------------------\n"
+            "1. 系统随机选择一句 5-10 字古诗作为答案。\n"
+            "2. 你发送任意汉字诗句进行猜测（长度可与答案不同）。\n"
+            "3. 每次猜测后，每个字的【汉字/声母/韵母/声调】独立着色。\n"
+            "4. 显示网格始终为答案长度：短了空格子，长了忽略超出部分。\n"
+            "5. 四个属性全绿即猜中！\n"
+            "指令：/猜诗句 开始 | /结束猜诗句 退出"
+        )
+        yield event.plain_result(msg)
+
+    # ==========================================
     # 🤖 Bot 管理指令
     # ==========================================
     @filter.command("bot加入")
@@ -583,6 +648,37 @@ class PoetryPlugin(Star):
         if not msg_raw or msg_raw.startswith(("/", "查询", "生成战报", "恢复", "结束", "纵横", "衔字", "蛇形", "删除", "安装", "bot")): return
 
         session_id = str(event.get_group_id() or event.get_session_id())
+
+        # 🎯 猜诗句游戏处理
+        if session_id in self.guess_verse_sessions:
+            engine = self.guess_verse_sessions[session_id]
+            ok, err, comp, all_correct = engine.guess(msg_raw)
+            if not ok:
+                yield event.plain_result(err)
+                return
+            img_path = os.path.join(str(self.plugin_data_dir), f"verse_{session_id}.png")
+            render_grid(engine, img_path, max_attempts=self.verse_max_attempts)
+            yield event.image_result(img_path)
+
+            if all_correct:
+                ans_path = os.path.join(str(self.plugin_data_dir), f"verse_ans_{session_id}.png")
+                render_answer(engine, ans_path)
+                yield event.image_result(ans_path)
+                yield event.plain_result(f"🎉 猜中了！{engine.target_text}")
+                del self.guess_verse_sessions[session_id]
+                if os.path.exists(img_path): os.remove(img_path)
+            elif engine.is_finished():
+                ans_path = os.path.join(str(self.plugin_data_dir), f"verse_ans_{session_id}.png")
+                render_answer(engine, ans_path)
+                yield event.image_result(ans_path)
+                yield event.plain_result(f"机会耗尽！正确诗句：{engine.target_text}")
+                del self.guess_verse_sessions[session_id]
+                if os.path.exists(img_path): os.remove(img_path)
+            else:
+                remaining = self.verse_max_attempts - len(engine.history)
+                yield event.plain_result(f"继续猜！剩余 {remaining} 次机会")
+            return
+
         if session_id not in self.active_games: return
 
         engine = self.active_games[session_id]

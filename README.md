@@ -1,4 +1,4 @@
-# AstrBot 诗词游戏引擎
+﻿# AstrBot 诗词游戏引擎
 
 ![Version](https://img.shields.io/badge/version-v3.2.1-blue)
 ![Python](https://img.shields.io/badge/python-3.10%2B-green)
@@ -97,6 +97,29 @@ https://github.com/sfw2099/astrbot_plugin_poetry_games.git
 
 ---
 
+## 🎯 猜诗句
+
+Wordle 风格的猜诗句游戏！系统随机选择一句 5-10 字古诗，通过颜色反馈猜测。
+
+```
+/猜诗句         → 开始新游戏
+发送诗句        → 进行猜测（长度可与答案不同）
+/结束猜诗句     → 退出
+/猜诗句帮助     → 查看规则
+```
+
+**颜色规则**：每个字的【汉字/声母/韵母/声调】四个属性独立着色：
+
+| 颜色 | 含义 |
+|------|------|
+| 🟢 绿色 | 正确且在正确位置 |
+| 🟠 橙色 | 答案中存在但位置错误 |
+| ⚪ 灰色 | 答案中不存在 |
+
+**长度处理**：显示网格始终为答案长度，短了空格子，长了忽略超出部分。全部猜中即获胜！
+
+---
+
 ## AI Bot
 
 发送 `/bot加入` 让 Bot 自动参与对战，支持衔字飞花令和纵横飞花令。
@@ -120,6 +143,7 @@ https://github.com/sfw2099/astrbot_plugin_poetry_games.git
 | `/衔字飞花令` | 建立衔字飞花令对局 |
 | `/纵横飞花令 [宽] [高]` | 建立纵横飞花令（默认 24x24） |
 | `/蛇形飞花令 [宽] [高]` | 建立蛇形飞花令（默认 40x40） |
+| `/猜诗句` | 开始猜诗句游戏 |
 
 ### 局内操作
 | 指令 | 说明 |
@@ -154,6 +178,9 @@ https://github.com/sfw2099/astrbot_plugin_poetry_games.git
 | `flowing_timeout` | int | 60 | 衔字飞花令每回限时（秒） |
 | `crossword_timeout` | int | 90 | 纵横飞花令每回限时（秒） |
 | `snake_timeout` | int | 120 | 蛇形飞花令每回限时（秒） |
+| `verse_max_attempts` | int | 10 | 猜诗句每局最大猜测次数 |
+| `verse_min_len` | int | 5 | 猜诗句答案最短字数 |
+| `verse_max_len` | int | 10 | 猜诗句答案最长字数 |
 | `proxy_urls` | text | (内置列表) | 数据库下载地址，一行一个 |
 
 ---

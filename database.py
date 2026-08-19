@@ -80,3 +80,32 @@ class PoetryDB:
                 if clean_text in pure_sentences:
                     return (title, author, dynasty)
         return None
+
+    def get_random_verse(self, min_len=5, max_len=10, target_count=8, max_scan=200):
+        """随机抽取若干条指定长度范围的完整诗句，返回 [(句子, 标题, 作者, 朝代)]"""
+        import random
+        candidates = []
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            # 用 rowid 随机抽样，避免 ORDER BY RANDOM() 全表排序
+            cursor.execute("SELECT COUNT(*) FROM poems")
+            total = cursor.fetchone()[0]
+            if not total:
+                return candidates
+            tried = 0
+            while len(candidates) < target_count and tried < max_scan:
+                tried += 1
+                offset = random.randint(0, total - 1)
+                cursor.execute("SELECT title, author, dynasty, content FROM poems LIMIT 1 OFFSET ?", (offset,))
+                row = cursor.fetchone()
+                if not row:
+                    continue
+                title, author, dynasty, content = row
+                sentences = re.split(r'[，。！？\n\r\s、；：]+', content)
+                for s in sentences:
+                    pure = re.sub(r'[^\u4e00-\u9fa5]', '', s)
+                    if min_len <= len(pure) <= max_len:
+                        candidates.append((pure, title, author, dynasty))
+                        if len(candidates) >= target_count:
+                            break
+        return candidates

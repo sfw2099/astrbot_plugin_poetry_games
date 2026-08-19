@@ -13,5 +13,25 @@
         "title": "蛇形飞花令超时时间(秒)",
         "type": "int",
         "default": 120
+    },
+    "verse_max_attempts": {
+        "title": "猜诗句最大次数",
+        "type": "int",
+        "default": 10,
+        "slider": {
+            "min": 5,
+            "max": 15,
+            "step": 1
+        }
+    },
+    "verse_min_len": {
+        "title": "猜诗句最短字数",
+        "type": "int",
+        "default": 5
+    },
+    "verse_max_len": {
+        "title": "猜诗句最长字数",
+        "type": "int",
+        "default": 10
     }
 }
