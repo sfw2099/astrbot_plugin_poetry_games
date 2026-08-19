@@ -195,17 +195,18 @@ class GuessVerseEngine:
 
 # ============ 渲染 ============
 
-CELL_W, CELL_H = 150, 170
+CELL_W, CELL_H = 160, 185
 GAP = 8
 PAD = 40
-HEADER_H = 80
+HEADER_H = 85
 FOOTER_H = 70
 
+# (bg, text) — 更鲜明的对比色
 COLOR_MAP = {
-    "correct": ((166, 220, 136), (26, 110, 26)),
-    "present": ((255, 212, 100), (175, 120, 0)),
-    "absent": ((200, 200, 200), (100, 100, 100)),
-    "empty": ((245, 245, 250), (180, 180, 185)),
+    "correct": ((76, 195, 84), (255, 255, 255)),      # 亮绿
+    "present": ((255, 176, 32), (255, 255, 255)),     # 亮橙
+    "absent": ((120, 120, 120), (255, 255, 255)),     # 深灰
+    "empty": ((235, 235, 240), (180, 180, 185)),      # 浅空
     "default": ((245, 245, 250), (60, 60, 60)),
 }
 
@@ -257,11 +258,11 @@ def render_grid(engine, output_path, title="猜诗句", max_attempts=10):
     img = Image.new("RGB", (img_w, img_h), (250, 250, 252))
     draw = ImageDraw.Draw(img)
 
-    f_title = _get_font(28)
-    f_char = _get_font(48)
-    f_py = _get_font(18)
-    f_py_lg = _get_font(20)
-    f_hint = _get_font(14)
+    f_title = _get_font(30)
+    f_char = _get_font(54)
+    f_py = _get_font(26)
+    f_py_lg = _get_font(30)
+    f_hint = _get_font(15)
 
     draw.text((img_w // 2, 20), title, fill=(30, 30, 30), font=f_title, anchor="mt")
 
@@ -284,10 +285,10 @@ def render_grid(engine, output_path, title="猜诗句", max_attempts=10):
 
             ch = gp["char"] if gp else ""
             ch_color = COLOR_MAP.get(cell.get("char", "default"), (None, (60, 60, 60)))[1]
-            draw.text((x + CELL_W // 2, y + CELL_H // 2 + 20), ch, fill=ch_color, font=f_char, anchor="mm")
+            draw.text((x + CELL_W // 2, y + CELL_H // 2 + 30), ch, fill=ch_color, font=f_char, anchor="mm")
 
-            # 拼音部件
-            py_y = y + 15
+            # 拼音部件（顶部，加大字号）
+            py_y = y + 20
             if gp:
                 initial = gp.get("initial", "")
                 final = gp.get("final", "")
@@ -298,11 +299,11 @@ def render_grid(engine, output_path, title="猜诗句", max_attempts=10):
                 tone_color = COLOR_MAP.get(cell.get("tone", "default"), (None, (90, 90, 90)))[1]
 
                 if initial:
-                    draw.text((x + 10, py_y), initial, fill=init_color, font=f_py, anchor="lt")
+                    draw.text((x + 12, py_y), initial, fill=init_color, font=f_py, anchor="lt")
                 if final:
                     draw.text((x + CELL_W // 2, py_y), final, fill=final_color, font=f_py_lg, anchor="mt")
                 if tone:
-                    draw.text((x + CELL_W - 10, py_y), tone, fill=tone_color, font=f_py, anchor="rt")
+                    draw.text((x + CELL_W - 12, py_y), tone, fill=tone_color, font=f_py, anchor="rt")
 
     # 底部：机会和答案长度提示
     remaining = max_attempts - len(engine.history)

@@ -656,7 +656,7 @@ class PoetryPlugin(Star):
             engine = self.guess_verse_sessions[session_id]
             ok, err, comp, all_correct = engine.guess(msg_raw)
             if not ok:
-                yield event.plain_result(err)
+                # 不合规的猜测静默忽略，不回复，不占次数
                 return
             img_path = os.path.join(str(self.plugin_data_dir), f"verse_{session_id}.png")
             render_grid(engine, img_path, max_attempts=self.verse_max_attempts)
