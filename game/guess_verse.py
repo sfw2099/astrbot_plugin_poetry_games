@@ -201,14 +201,15 @@ PAD = 40
 HEADER_H = 85
 FOOTER_H = 70
 
-# (bg, text) — 更鲜明的对比色
+# (bg, text) — 白底黑字 + 淡色状态背景
 COLOR_MAP = {
-    "correct": ((76, 195, 84), (255, 255, 255)),      # 亮绿
-    "present": ((255, 176, 32), (255, 255, 255)),     # 亮橙
-    "absent": ((120, 120, 120), (255, 255, 255)),     # 深灰
-    "empty": ((235, 235, 240), (180, 180, 185)),      # 浅空
-    "default": ((245, 245, 250), (60, 60, 60)),
+    "correct": ((214, 240, 214), (30, 30, 30)),      # 淡绿
+    "present": ((255, 232, 190), (30, 30, 30)),      # 淡橙
+    "absent": ((228, 228, 230), (30, 30, 30)),       # 淡灰
+    "empty": ((248, 248, 250), (170, 170, 175)),     # 白
+    "default": ((255, 255, 255), (30, 30, 30)),
 }
+BORDER_COLOR = (20, 20, 20)
 
 _FONT_PATH = None
 _PLUGIN_DIR = None
@@ -277,26 +278,26 @@ def render_grid(engine, output_path, title="猜诗句", max_attempts=10):
 
             if cell is None:
                 bg, _ = COLOR_MAP["empty"]
-                draw.rounded_rectangle([x, y, x + CELL_W, y + CELL_H], radius=10, fill=bg, outline=(210, 210, 215), width=1)
+                draw.rounded_rectangle([x, y, x + CELL_W, y + CELL_H], radius=10, fill=bg, outline=BORDER_COLOR, width=2)
                 continue
 
             bg, _ = COLOR_MAP.get(cell.get("char", "default"), COLOR_MAP["default"])
-            draw.rounded_rectangle([x, y, x + CELL_W, y + CELL_H], radius=10, fill=bg, outline=(200, 200, 210), width=1)
+            draw.rounded_rectangle([x, y, x + CELL_W, y + CELL_H], radius=10, fill=bg, outline=BORDER_COLOR, width=2)
 
             ch = gp["char"] if gp else ""
-            ch_color = COLOR_MAP.get(cell.get("char", "default"), (None, (60, 60, 60)))[1]
-            draw.text((x + CELL_W // 2, y + CELL_H // 2 + 30), ch, fill=ch_color, font=f_char, anchor="mm")
+            ch_color = COLOR_MAP.get(cell.get("char", "default"), (None, (30, 30, 30)))[1]
+            draw.text((x + CELL_W // 2, y + CELL_H // 2 + 5), ch, fill=ch_color, font=f_char, anchor="mm")
 
-            # 拼音部件（顶部，加大字号）
-            py_y = y + 20
+            # 拼音部件（顶部，与汉字间距缩小）
+            py_y = y + 26
             if gp:
                 initial = gp.get("initial", "")
                 final = gp.get("final", "")
                 tone = str(gp.get("tone", "")) if gp.get("tone", 0) > 0 else ""
 
-                init_color = COLOR_MAP.get(cell.get("initial", "default"), (None, (90, 90, 90)))[1]
-                final_color = COLOR_MAP.get(cell.get("final", "default"), (None, (90, 90, 90)))[1]
-                tone_color = COLOR_MAP.get(cell.get("tone", "default"), (None, (90, 90, 90)))[1]
+                init_color = COLOR_MAP.get(cell.get("initial", "default"), (None, (30, 30, 30)))[1]
+                final_color = COLOR_MAP.get(cell.get("final", "default"), (None, (30, 30, 30)))[1]
+                tone_color = COLOR_MAP.get(cell.get("tone", "default"), (None, (30, 30, 30)))[1]
 
                 if initial:
                     draw.text((x + 12, py_y), initial, fill=init_color, font=f_py, anchor="lt")
