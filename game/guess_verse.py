@@ -155,14 +155,14 @@ class GuessVerseEngine:
         return True, verse
 
     def guess(self, text):
-        """处理一次猜测。返回 (ok, msg, compare_result)。"""
+        """处理一次猜测。返回 (ok, msg, compare_result, all_correct)。"""
         clean = re.sub(r'[^\u4e00-\u9fa5]', '', text)
         if not clean:
-            return False, "请输入汉字诗句", None
+            return False, "请输入汉字诗句", None, False
         if len(clean) > self.max_len:
-            return False, f"诗句最长 {self.max_len} 字，当前 {len(clean)} 字", None
+            return False, f"诗句最长 {self.max_len} 字，当前 {len(clean)} 字", None, False
         if len(clean) < 2:
-            return False, "请输入至少 2 个字", None
+            return False, "请输入至少 2 个字", None, False
 
         guess_parts = decompose_text(clean)
         comp = compare_guess(guess_parts, self.target_parts)
