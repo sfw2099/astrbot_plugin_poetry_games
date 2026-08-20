@@ -206,16 +206,16 @@ class GuessVerseEngine:
 
     def guess(self, text):
         """处理一次猜测。返回 (ok, msg, compare_result, all_correct)。
-        仅计入数据库中的完整诗句；不合规的猜测不计次数。"""
+        仅计入总诗词库中的完整诗句；不合规的猜测不计次数。"""
         clean = re.sub(r'[^\u4e00-\u9fa5]', '', text)
         if not clean:
             return False, "请输入汉字诗句", None, False
-        if len(clean) > self.max_len:
-            return False, f"诗句最长 {self.max_len} 字，当前 {len(clean)} 字", None, False
+        if len(clean) > 20:
+            return False, f"诗句最长 20 字，当前 {len(clean)} 字", None, False
         if len(clean) < 2:
             return False, "请输入至少 2 个字", None, False
 
-        # 合规校验：必须是数据库中的完整诗句，否则不计入猜测
+        # 合规校验：必须是总诗词库中的完整诗句，否则不计入猜测
         if not self._is_valid_poem_line(clean):
             return False, f"「{clean}」不是一句完整的古诗，请发送合规诗句（如：春眠不觉晓）", None, False
 
@@ -230,18 +230,16 @@ class GuessVerseEngine:
         return True, "", comp, all_correct
 
     def _is_valid_poem_line(self, clean):
-        """校验是否为经典曲库或全库中的完整单句。"""
-        # 优先查经典曲库（无需访问 DB，含近代诗等全库没有的内容）
-        if clean in self._classic_sentences:
-            return True
-        # 回退全库
+        """校验是否为总诗词库中的完整单句（识别用总库，支持任意字数）。"""
         db = self.db_source
         if hasattr(db, "is_complete_sentence"):
             try:
-                return db.is_complete_sentence(clean)
+                if db.is_complete_sentence(clean):
+                    return True
             except Exception:
                 pass
-        return False
+        # 兜底：经典曲库（总库不可用时）
+        return clean in self._classic_sentences
 
     def is_finished(self):
         return len(self.history) >= self.max_attempts

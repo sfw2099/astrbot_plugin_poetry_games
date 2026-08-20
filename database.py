@@ -89,7 +89,7 @@ class PoetryDB:
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
-                cursor.execute("SELECT content FROM poems WHERE content LIKE ? LIMIT 50", (f'%{clean_text}%',))
+                cursor.execute("SELECT content FROM poems WHERE content LIKE ? LIMIT 300", (f'%{clean_text}%',))
                 for (content,) in cursor.fetchall():
                     sentences = re.split(r'[，。！？\n\r\s、；：]+', content)
                     pure_sentences = [re.sub(r'[^\u4e00-\u9fa5]', '', s) for s in sentences if s]
