@@ -38,6 +38,13 @@ def _ensure_pypinyin():
         return False
 
 
+# pypinyin 韵母变体 -> 教学标准形式
+_FINAL_ALIAS = {
+    "v": "ü", "ve": "üe", "vn": "ün",   # ü 系列
+    "iou": "iu", "uei": "ui", "uen": "un",  # 省写还原
+}
+
+
 def _decompose_char(char):
     """分解单字为 (initial 声母, final 韵母, tone 声调)。"""
     if not _ensure_pypinyin():
@@ -60,6 +67,9 @@ def _decompose_char(char):
 
         final_list = _pinyin(char, style=_Style.FINALS)
         final = final_list[0][0] if final_list and final_list[0] else ""
+
+        # 韵母归一化：pypinyin 变体 -> 教学标准形式
+        final = _FINAL_ALIAS.get(final, final)
 
         # y/w 零声母处理：按小学拼音教学法，把 y/w 当作声母展示
         # 例：往 wǎng -> 声母 w 韵母 ang（而非空声母 + uang）
@@ -150,6 +160,27 @@ class GuessVerseEngine:
         # 经典曲库：list[dict(title/author/dynasty/category/content)]
         self.classic_poems = classic_poems or []
         self._classic_sentences = self._build_classic_index()
+        # 声母/韵母状态记录（用于提示功能，静默累积）
+        self.initial_status = {}  # 声母 -> correct/present/absent
+        self.final_status = {}    # 韵母 -> correct/present/absent
+
+    def _record_pinyin_status(self, guess_parts, comp):
+        """累积记录每次猜测的声母/韵母状态（不主动显示）。"""
+        priority = {"correct": 3, "present": 2, "absent": 1}
+        for i, cell in enumerate(comp):
+            if cell is None or i >= len(guess_parts):
+                continue
+            gp = guess_parts[i]
+            init = gp.get("initial", "")
+            if init:
+                st = cell.get("initial", "")
+                if priority.get(st, 0) > priority.get(self.initial_status.get(init), 0):
+                    self.initial_status[init] = st
+            final = gp.get("final", "")
+            if final:
+                st = cell.get("final", "")
+                if priority.get(st, 0) > priority.get(self.final_status.get(final), 0):
+                    self.final_status[final] = st
 
     def _build_classic_index(self):
         """构建经典曲库的「诗句 -> 篇目」索引。"""
@@ -222,6 +253,8 @@ class GuessVerseEngine:
         guess_parts = decompose_text(clean)
         comp = compare_guess(guess_parts, self.target_parts)
         self.history.append((clean, guess_parts, comp))
+        # 静默记录声母/韵母状态
+        self._record_pinyin_status(guess_parts, comp)
 
         all_correct = all(
             c is not None and all(v == "correct" for v in c.values())
@@ -262,6 +295,24 @@ STATUS_COLOR = {
     "absent": (160, 160, 160),    # 灰
     "empty": (200, 200, 205),     # 空格
     "default": (30, 30, 30),      # 黑
+}
+
+# 声母表（23 个，含 y/w）
+INITIALS_LIST = ['b', 'p', 'm', 'f', 'd', 't', 'n', 'l', 'g', 'k', 'h',
+                 'j', 'q', 'x', 'zh', 'ch', 'sh', 'r', 'z', 'c', 's', 'y', 'w']
+
+# 韵母表（含介音韵母）
+FINALS_LIST = ['a', 'o', 'e', 'i', 'u', 'ü', 'ai', 'ei', 'ui', 'ao', 'ou', 'iu',
+               'ie', 'üe', 'er', 'an', 'en', 'in', 'un', 'ün', 'ang', 'eng', 'ing',
+               'ong', 'ia', 'iao', 'ian', 'iang', 'iong', 'ua', 'uo', 'uai', 'uan',
+               'uang', 'ueng', 'üan']
+
+# 提示图颜色：correct绿 / present黄 / absent黑 / 默认浅灰
+HINT_COLOR = {
+    "correct": (0, 150, 40),
+    "present": (230, 140, 0),
+    "absent": (50, 50, 55),
+    "default": (235, 235, 240),
 }
 
 _FONT_PATH = None
@@ -415,6 +466,81 @@ def render_answer(engine, output_path):
 
     info = f"《{engine.title}》 [{engine.dynasty}] {engine.author}"
     draw.text((w // 2, 170), info, fill=(80, 80, 80), font=f_info, anchor="mm")
+
+    img.save(output_path, "PNG")
+    return output_path
+
+
+def render_hint(engine, output_path):
+    """渲染声母韵母提示图。
+
+    - 黑色：已排除（不在答案中）
+    - 绿色：正确且位置正确
+    - 黄色：答案中存在但位置错误
+    - 浅灰：尚未在猜测中出现（可能仍在答案中）
+    """
+    pad = 30
+    title_h = 60
+    cell_h = 44
+    gap = 6
+
+    init_cell_w = 52
+    final_cell_w = 64
+
+    f_title = _get_font(26)
+    f_label = _get_font(18)
+    f_item = _get_font(20)
+    f_legend = _get_font(15)
+
+    def line_width(n, cw):
+        return n * cw + (n - 1) * gap
+
+    init_per_row = 12
+    init_rows = (len(INITIALS_LIST) + init_per_row - 1) // init_per_row
+    final_per_row = 10
+    final_rows = (len(FINALS_LIST) + final_per_row - 1) // final_per_row
+
+    content_w = max(line_width(init_per_row, init_cell_w), line_width(final_per_row, final_cell_w))
+    img_w = pad * 2 + content_w
+
+    init_area_h = 30 + init_rows * (cell_h + gap)
+    final_area_h = 30 + final_rows * (cell_h + gap)
+    legend_h = 40
+    img_h = pad + title_h + init_area_h + final_area_h + legend_h + pad
+
+    img = Image.new("RGB", (img_w, img_h), (255, 255, 255))
+    draw = ImageDraw.Draw(img)
+
+    draw.text((img_w // 2, 18), "声母韵母提示", fill=(30, 30, 30), font=f_title, anchor="mt")
+
+    y = pad + title_h
+
+    def draw_group(label, items, status_map, cell_w, per_row, yy):
+        draw.text((pad, yy), label, fill=(80, 80, 80), font=f_label, anchor="lt")
+        yy += 28
+        for idx, item in enumerate(items):
+            row = idx // per_row
+            col = idx % per_row
+            x = pad + col * (cell_w + gap)
+            cy = yy + row * (cell_h + gap)
+            status = status_map.get(item, "default")
+            bg = HINT_COLOR.get(status, HINT_COLOR["default"])
+            fg = (40, 40, 40) if status == "default" else (255, 255, 255)
+            draw.rounded_rectangle([x, cy, x + cell_w, cy + cell_h], radius=6, fill=bg, outline=(200, 200, 205), width=1)
+            draw.text((x + cell_w // 2, cy + cell_h // 2), item, fill=fg, font=f_item, anchor="mm")
+        return yy + (len(items) + per_row - 1) // per_row * (cell_h + gap)
+
+    y = draw_group("声母", INITIALS_LIST, engine.initial_status, init_cell_w, init_per_row, y)
+    y += 6
+    draw_group("韵母", FINALS_LIST, engine.final_status, final_cell_w, final_per_row, y)
+
+    legend_y = img_h - pad - legend_h + 10
+    lx = pad
+    for label, color in [("绿色=正确", HINT_COLOR["correct"]), ("黄色=错位", HINT_COLOR["present"]),
+                         ("黑色=排除", HINT_COLOR["absent"]), ("浅灰=未用", HINT_COLOR["default"])]:
+        draw.rectangle([lx, legend_y, lx + 14, legend_y + 14], fill=color, outline=(200, 200, 205))
+        draw.text((lx + 18, legend_y - 2), label, fill=(60, 60, 60), font=f_legend, anchor="lt")
+        lx += 110
 
     img.save(output_path, "PNG")
     return output_path

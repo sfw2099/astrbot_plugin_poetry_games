@@ -13,7 +13,7 @@ from .database import PoetryDB
 from .game.flowing_petals import FlowingPetalsEngine
 from .game.crossword_poetry import PoetryCrosswordEngine
 from .game.snake_poetry import PoetrySnakeEngine
-from .game.guess_verse import GuessVerseEngine, render_grid, render_answer, _init_plugin_dir
+from .game.guess_verse import GuessVerseEngine, render_grid, render_answer, render_hint, _init_plugin_dir
 
 GITEE_BASE = "https://gitee.com/alin1031/poetry-data/releases/download/v1.0.0/poetry_data.zip"
 GITEE_PROBE = GITEE_BASE + ".part01"  # 探测分片而非基文件（基文件不存在）
@@ -674,6 +674,12 @@ class PoetryPlugin(Star):
         # 🎯 猜诗句游戏处理
         if session_id in self.guess_verse_sessions:
             engine = self.guess_verse_sessions[session_id]
+            # 提示指令：显示声母韵母状态
+            if msg_raw in ("提示", "声韵提示", "拼音提示"):
+                hint_path = os.path.join(str(self.plugin_data_dir), f"verse_hint_{session_id}.png")
+                render_hint(engine, hint_path)
+                yield event.image_result(hint_path)
+                return
             ok, err, comp, all_correct = engine.guess(msg_raw)
             if not ok:
                 # 不合规的猜测静默忽略，不回复，不占次数
