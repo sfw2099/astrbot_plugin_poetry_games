@@ -61,6 +61,26 @@ class PoetryPlugin(Star):
         except Exception:
             pass
 
+        # 加载经典诗词曲库（随插件分发）
+        self.plugin_code_dir = os.path.dirname(os.path.abspath(__file__))
+        self.classic_poems = self._load_classic_poems()
+
+    def _load_classic_poems(self):
+        """加载经典诗词曲库 classic_poems.json。返回 list 或空列表。"""
+        import json
+        path = os.path.join(self.plugin_code_dir, "classic_poems.json")
+        if not os.path.exists(path):
+            logger.warning(f"[guess_verse] 经典曲库不存在: {path}")
+            return []
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            logger.info(f"[guess_verse] 经典曲库加载成功: {len(data)} 篇")
+            return data
+        except Exception as e:
+            logger.error(f"[guess_verse] 经典曲库加载失败: {e}")
+            return []
+
     def _ensure_db(self):
         """惰性加载数据库"""
         if self.db is not None:
@@ -341,7 +361,7 @@ class PoetryPlugin(Star):
             yield event.plain_result("游戏进行中！发送诗句进行猜测，或发送【结束猜诗句】退出。")
             return
 
-        engine = GuessVerseEngine(self.db, self.verse_max_attempts, self.verse_min_len, self.verse_max_len)
+        engine = GuessVerseEngine(self.db, self.verse_max_attempts, self.verse_min_len, self.verse_max_len, classic_poems=self.classic_poems)
         ok, msg = engine.new_game()
         if not ok:
             yield event.plain_result(f"❌ 初始化失败：{msg}")

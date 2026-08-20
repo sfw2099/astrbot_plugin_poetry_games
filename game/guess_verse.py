@@ -121,7 +121,7 @@ def compare_guess(guess_parts, answer_parts):
 class GuessVerseEngine:
     """猜诗句游戏引擎（单机，无存档）"""
 
-    def __init__(self, db_source, max_attempts=10, min_len=5, max_len=10):
+    def __init__(self, db_source, max_attempts=10, min_len=5, max_len=10, classic_poems=None):
         self.db_source = db_source
         self.max_attempts = max_attempts
         self.min_len = min_len
@@ -132,9 +132,44 @@ class GuessVerseEngine:
         self.author = None
         self.dynasty = None
         self.history = []  # [(guess_text, guess_parts, compare_result)]
+        # 经典曲库：list[dict(title/author/dynasty/category/content)]
+        self.classic_poems = classic_poems or []
+        self._classic_sentences = self._build_classic_index()
+
+    def _build_classic_index(self):
+        """构建经典曲库的「诗句 -> 篇目」索引。"""
+        index = {}
+        for p in self.classic_poems:
+            content = p.get("content", "")
+            for sent in re.split(r'[，。！？；：、\n\r\s]+', content):
+                pure = re.sub(r'[^\u4e00-\u9fa5]', '', sent)
+                if self.min_len <= len(pure) <= self.max_len:
+                    index.setdefault(pure, p)
+        return index
+
+    def _random_classic_verse(self):
+        """从经典曲库随机抽取一句 5-10 字诗句。返回 (verse, title, author, dynasty) 或 None。"""
+        if not self._classic_sentences:
+            return None
+        verse = random.choice(list(self._classic_sentences.keys()))
+        p = self._classic_sentences[verse]
+        return verse, p.get("title", ""), p.get("author", ""), p.get("dynasty", "")
 
     def new_game(self):
-        """从数据库随机抽取一句 5-10 字诗句作为答案。返回 (ok, msg)。"""
+        """从经典曲库优先抽取一句 5-10 字诗句作为答案。返回 (ok, msg)。"""
+        # 优先经典曲库（不依赖 DB）
+        classic = self._random_classic_verse()
+        if classic:
+            verse, title, author, dynasty = classic
+            self.target_text = verse
+            self.target_parts = decompose_text(verse)
+            self.title = title
+            self.author = author
+            self.dynasty = dynasty
+            self.history = []
+            return True, verse
+
+        # 回退：全库随机抽取
         if not self.db_source:
             return False, "数据库不可用"
         db_path = self.db_source if isinstance(self.db_source, str) else getattr(self.db_source, "db_path", None)
@@ -180,7 +215,11 @@ class GuessVerseEngine:
         return True, "", comp, all_correct
 
     def _is_valid_poem_line(self, clean):
-        """校验是否为数据库中的完整单句。"""
+        """校验是否为经典曲库或全库中的完整单句。"""
+        # 优先查经典曲库（无需访问 DB，含近代诗等全库没有的内容）
+        if clean in self._classic_sentences:
+            return True
+        # 回退全库
         db = self.db_source
         if hasattr(db, "is_complete_sentence"):
             try:
