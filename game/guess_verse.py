@@ -61,6 +61,21 @@ def _decompose_char(char):
         final_list = _pinyin(char, style=_Style.FINALS)
         final = final_list[0][0] if final_list and final_list[0] else ""
 
+        # y/w 零声母处理：按小学拼音教学法，把 y/w 当作声母展示
+        # 例：往 wǎng -> 声母 w 韵母 ang（而非空声母 + uang）
+        if not initial and base:
+            if base.startswith("y"):
+                initial = "y"
+                rest = base[1:]
+                # y + u 实际是 ü（鱼 yu->ü, 月 yue->üe, 云 yun->ün, 元 yuan->üan）
+                if rest.startswith("u"):
+                    final = "ü" + rest[1:]
+                else:
+                    final = rest
+            elif base.startswith("w"):
+                initial = "w"
+                final = base[1:]
+
         return {"char": char, "initial": initial, "final": final, "tone": tone, "base": base}
     except Exception:
         return {"char": char, "initial": "", "final": "", "tone": 0, "base": char}
