@@ -216,11 +216,35 @@ class GuessVerseEngine:
             index.setdefault(sent, p)
         return index
 
+    def _category_weight(self, category):
+        """分类抽取权重：热门分类权重大，楚辞/诗经降权。"""
+        w = {
+            "唐诗三百首": 5,
+            "宋词三百首": 5,
+            "教材诗词": 4,
+            "名句": 3,
+            "毛泽东诗词": 2,
+            "元曲四大家": 2,
+            "诗经": 1,
+            "楚辞": 1,
+            "近代名篇": 1,
+        }
+        return w.get(category, 1)
+
     def _random_classic_verse(self):
-        """从经典曲库随机抽取一句完整句。返回 (sentence, poem) 或 None。"""
+        """从经典曲库按分类权重随机抽取一句完整句。返回 (sentence, poem) 或 None。"""
         if not self._classic_sentences:
             return None
-        sent = random.choice(list(self._classic_sentences.keys()))
+        # 按分类分组
+        groups = {}
+        for sent, poem in self._classic_sentences.items():
+            cat = poem.get("category", "")
+            groups.setdefault(cat, []).append(sent)
+        # 按权重选分类
+        cats = list(groups.keys())
+        weights = [self._category_weight(c) for c in cats]
+        chosen_cat = random.choices(cats, weights=weights, k=1)[0]
+        sent = random.choice(groups[chosen_cat])
         return sent, self._classic_sentences[sent]
 
     def new_game(self):
