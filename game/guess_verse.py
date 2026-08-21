@@ -412,15 +412,15 @@ def _draw_pinyin_joined(draw, x_center, y_mid, segments):
 def _build_layout(engine):
     """构建渲染布局：[(type, index_or_punct)]。
     type='hanzi' 表示汉字列（index 为汉字序号），type='punct' 表示标点列。
+    标点 (pos, punct) 表示「第 pos 个汉字之后」，即处理完第 i 个汉字后若 i+1==pos 则加标点。
     """
     layout = []
-    hanzi_idx = 0
-    punct_map = dict(engine.target_punct)  # {hanzi_index: punct}
+    punct_map = dict(engine.target_punct)  # {hanzi_pos_after: punct}
     n = len(engine.target_hanzi)
     for i in range(n):
         layout.append(("hanzi", i))
-        if i in punct_map:
-            layout.append(("punct", punct_map[i]))
+        if (i + 1) in punct_map:
+            layout.append(("punct", punct_map[i + 1]))
     return layout
 
 
@@ -467,7 +467,7 @@ def render_grid(engine, output_path, title="猜诗句", max_attempts=10):
                 # 标点列：显示标点（深色，不参与比较）
                 draw.rounded_rectangle([x, y, x + PUNCT_W, y + CELL_H], radius=6, fill=(245, 245, 248),
                                        outline=(210, 210, 215), width=1)
-                draw.text((x + PUNCT_W // 2, y + CELL_H // 2), lval, fill=(90, 90, 95), font=f_punct, anchor="mm")
+                draw.text((x + PUNCT_W // 2, y + int(CELL_H * 0.72)), lval, fill=(90, 90, 95), font=f_punct, anchor="mm")
                 continue
 
             cell = comp_result[hanzi_pos] if hanzi_pos < len(comp_result) else None
@@ -543,7 +543,7 @@ def render_blank(engine, output_path):
         if ltype == "punct":
             draw.rounded_rectangle([x, y, x + PUNCT_W, y + CELL_H], radius=6, fill=(245, 245, 248),
                                    outline=(210, 210, 215), width=1)
-            draw.text((x + PUNCT_W // 2, y + CELL_H // 2), lval, fill=(90, 90, 95), font=f_punct, anchor="mm")
+            draw.text((x + PUNCT_W // 2, y + int(CELL_H * 0.72)), lval, fill=(90, 90, 95), font=f_punct, anchor="mm")
         else:
             draw.rounded_rectangle([x, y, x + CELL_W, y + CELL_H], radius=10, fill=CELL_BG, outline=BORDER_COLOR, width=2)
             draw.text((x + CELL_W // 2, y + CELL_H // 2), "□", fill=(170, 170, 175), font=f_blank, anchor="mm")
@@ -582,7 +582,7 @@ def render_answer(engine, output_path):
     for col_idx, (ltype, lval) in enumerate(layout):
         x = col_x[col_idx]
         if ltype == "punct":
-            draw.text((x + PUNCT_W // 2, 90), lval, fill=(90, 90, 95), font=f_punct, anchor="mm")
+            draw.text((x + PUNCT_W // 2, 105), lval, fill=(90, 90, 95), font=f_punct, anchor="mm")
         else:
             part = engine.target_parts[hanzi_pos]
             draw.text((x + 100 // 2, 90), part["char"], fill=(24, 144, 255), font=f_char, anchor="mm")
