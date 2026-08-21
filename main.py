@@ -13,7 +13,7 @@ from .database import PoetryDB
 from .game.flowing_petals import FlowingPetalsEngine
 from .game.crossword_poetry import PoetryCrosswordEngine
 from .game.snake_poetry import PoetrySnakeEngine
-from .game.guess_verse import GuessVerseEngine, render_grid, render_answer, render_hint, _init_plugin_dir
+from .game.guess_verse import GuessVerseEngine, render_grid, render_blank, render_answer, render_hint, _init_plugin_dir
 
 GITEE_BASE = "https://gitee.com/alin1031/poetry-data/releases/download/v1.0.0/poetry_data.zip"
 GITEE_PROBE = GITEE_BASE + ".part01"  # 探测分片而非基文件（基文件不存在）
@@ -370,13 +370,18 @@ class PoetryPlugin(Star):
         self.guess_verse_sessions[session_id] = engine
         yield event.plain_result(
             "🎯 【猜诗句】开始！\n"
-            f"答案是一句 {len(engine.target_text)} 字的诗句，你有 {self.verse_max_attempts} 次机会。\n"
+            f"答案是一句 {len(engine.target_hanzi)} 字的完整诗句（含标点），你有 {self.verse_max_attempts} 次机会。\n"
+            "发送空白框对应的完整句（含标点）进行猜测，如：床前明月光，疑是地上霜。\n"
             "每次猜测后，每个字的【汉字/声母/韵母/声调】四个属性独立显示颜色：\n"
             "🟢 绿色 = 正确且位置正确\n"
             "🟠 橙色 = 答案中存在但位置错误\n"
             "⚪ 灰色 = 答案中不存在\n"
-            "发送任意汉字诗句即可猜测（长度可与答案不同）。"
+            "标点位置需与空白框一致。"
         )
+        # 发送空白框占位图
+        blank_path = os.path.join(str(self.plugin_data_dir), f"verse_blank_{session_id}.png")
+        render_blank(engine, blank_path)
+        yield event.image_result(blank_path)
 
     @filter.command("结束猜诗句")
     async def end_guess_verse(self, event: AstrMessageEvent):
