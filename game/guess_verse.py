@@ -695,3 +695,186 @@ def render_hint(engine, output_path):
 
     img.save(output_path, "PNG")
     return output_path
+
+
+# ============ 邀战对战模式 ============
+
+_BATTLE_RE = None
+
+
+def pick_battle_target(classic_poems):
+    """从教材诗词分类随机选一句「N，N。」结构（两等长分句，N=4/5/6）。返回 poem 或 None。"""
+    candidates = []
+    for p in classic_poems:
+        if p.get("category", "") != "教材诗词":
+            continue
+        sent = p.get("sentence", "")
+        m = re.match(r'^([\u4e00-\u9fff]{4,6})，([\u4e00-\u9fff]{4,6})[。！？]$', sent)
+        if m and len(m.group(1)) == len(m.group(2)):
+            p = dict(p)
+            p["first"] = m.group(1)
+            p["second"] = m.group(2)
+            p["mid_punct"] = "，"
+            p["end_punct"] = sent[-1]
+            candidates.append(p)
+    if not candidates:
+        return None
+    return random.choice(candidates)
+
+
+class BattleVerseEngine:
+    """邀战猜诗词对战引擎：两人各猜半句，先猜中者胜。"""
+
+    def __init__(self, poem, first_id, first_name, second_id, second_name):
+        self.poem = poem
+        self.first_id = str(first_id)       # 1号，猜前句
+        self.first_name = first_name
+        self.second_id = str(second_id)     # 2号，猜后句
+        self.second_name = second_name
+
+        self.first = poem["first"]
+        self.second = poem["second"]
+        self.first_parts = decompose_text(self.first)
+        self.second_parts = decompose_text(self.second)
+
+        self.first_history = []   # [(text, parts, comp)]
+        self.second_history = []  # [(text, parts, comp)]
+        self.current = "first"    # 轮到谁
+        self.winner = None
+        self.round = 0
+
+    def guess(self, user_id, text):
+        """处理某位玩家的半句猜测。返回 (ok, msg, side, comp, all_correct)。"""
+        uid = str(user_id)
+        text = text.strip()
+        clean = extract_hanzi(text)
+        if not clean:
+            return False, "请输入汉字诗句", None, None, False
+
+        side = "first" if uid == self.first_id else "second"
+        target_parts = self.first_parts if side == "first" else self.second_parts
+        target_len = len(target_parts)
+
+        if len(clean) != target_len:
+            return False, f"你的半句是 {target_len} 个字，当前 {len(clean)} 字", side, None, False
+
+        guess_parts = decompose_text(clean)
+        comp = compare_guess(guess_parts, target_parts)
+        if side == "first":
+            self.first_history.append((clean, guess_parts, comp))
+        else:
+            self.second_history.append((clean, guess_parts, comp))
+
+        all_correct = all(c is not None and all(v == "correct" for v in c.values()) for c in comp)
+        if all_correct:
+            self.winner = side
+        return True, "", side, comp, all_correct
+
+    def switch_turn(self):
+        self.round += 1
+        self.current = "second" if self.current == "first" else "first"
+
+    def is_turn(self, user_id):
+        return str(user_id) == (self.first_id if self.current == "first" else self.second_id)
+
+    def current_name(self):
+        return self.first_name if self.current == "first" else self.second_name
+
+    def current_side(self):
+        return self.current
+
+
+def render_battle(engine, output_path):
+    """渲染对战共享棋盘：左=1号前句，右=2号后句。"""
+    n = len(engine.first_parts)
+
+    pad = 30
+    header_h = 70
+    sub_h = 50
+    cell_h = 150
+    gap = 8
+
+    cell_w = 120
+    mid_gap = 40  # 左右区之间的间距
+
+    rows_first = max(1, len(engine.first_history))
+    rows_second = max(1, len(engine.second_history))
+    n_rows = max(rows_first, rows_second)
+
+    side_w = n * cell_w + (n - 1) * gap
+    img_w = pad * 2 + side_w * 2 + mid_gap
+    img_h = pad + header_h + sub_h + (n_rows + 1) * (cell_h + gap) + 70
+
+    img = Image.new("RGB", (img_w, img_h), (250, 250, 252))
+    draw = ImageDraw.Draw(img)
+
+    f_title = _get_font(28)
+    f_sub = _get_font(20)
+    f_char = _get_font(50)
+    f_py = _get_font(26)
+    f_hint = _get_font(14)
+
+    draw.text((img_w // 2, 18), "猜诗词对战", fill=(30, 30, 30), font=f_title, anchor="mt")
+
+    x_left = pad
+    x_right = pad + side_w + mid_gap
+
+    draw.text((x_left + side_w // 2, pad + header_h - 20), f"{engine.first_name}·前句", fill=(40, 40, 40), font=f_sub, anchor="mm")
+    draw.text((x_right + side_w // 2, pad + header_h - 20), f"{engine.second_name}·后句", fill=(40, 40, 40), font=f_sub, anchor="mm")
+
+    y0 = pad + header_h + sub_h
+
+    # 首行空白框
+    for side, x0 in (("first", x_left), ("second", x_right)):
+        for i in range(n):
+            x = x0 + i * (cell_w + gap)
+            draw.rounded_rectangle([x, y0, x + cell_w, y0 + cell_h], radius=8, fill=CELL_BG, outline=BORDER_COLOR, width=2)
+
+    # 猜测历史
+    for row_idx in range(n_rows):
+        y = y0 + (row_idx + 1) * (cell_h + gap)
+        if row_idx < len(engine.first_history):
+            text, parts, comp = engine.first_history[row_idx]
+            _draw_battle_row(draw, x_left, y, n, cell_w, cell_h, gap, parts, comp, f_char, f_py)
+        if row_idx < len(engine.second_history):
+            text, parts, comp = engine.second_history[row_idx]
+            _draw_battle_row(draw, x_right, y, n, cell_w, cell_h, gap, parts, comp, f_char, f_py)
+
+    if engine.winner:
+        wname = engine.first_name if engine.winner == "first" else engine.second_name
+        footer = f"🏆 {wname} 获胜！答案：{engine.first}，{engine.second}{engine.poem['end_punct']}"
+    else:
+        footer = f"轮到：{engine.current_name()}"
+    draw.text((img_w // 2, img_h - 20), footer, fill=(120, 120, 120), font=f_hint, anchor="mb")
+
+    img.save(output_path, "PNG")
+    return output_path
+
+
+def _draw_battle_row(draw, x0, y, n, cell_w, cell_h, gap, parts, comp, f_char, f_py):
+    for i in range(n):
+        x = x0 + i * (cell_w + gap)
+        cell = comp[i] if i < len(comp) else None
+        gp = parts[i] if i < len(parts) else None
+        draw.rounded_rectangle([x, y, x + cell_w, y + cell_h], radius=8, fill=CELL_BG, outline=BORDER_COLOR, width=2)
+        if not gp:
+            continue
+        ch_color = STATUS_COLOR.get(cell.get("char", "default"), STATUS_COLOR["default"]) if cell else STATUS_COLOR["default"]
+        draw.text((x + cell_w // 2, y + cell_h // 2 + 16), gp["char"], fill=ch_color, font=f_char, anchor="mm")
+
+        if cell:
+            py_mid = y + cell_h // 2 - 40
+            initial = gp.get("initial", "")
+            final = gp.get("final", "")
+            tone = str(gp.get("tone", "")) if gp.get("tone", 0) > 0 else ""
+            init_color = STATUS_COLOR.get(cell.get("initial", "default"), STATUS_COLOR["default"])
+            final_color = STATUS_COLOR.get(cell.get("final", "default"), STATUS_COLOR["default"])
+            tone_color = STATUS_COLOR.get(cell.get("tone", "default"), STATUS_COLOR["default"])
+            segments = []
+            if initial:
+                segments.append((initial, init_color, f_py))
+            if final:
+                segments.append((final, final_color, f_py))
+            if tone:
+                segments.append((tone, tone_color, f_py, 6))
+            _draw_pinyin_joined(draw, x + cell_w // 2, py_mid, segments)

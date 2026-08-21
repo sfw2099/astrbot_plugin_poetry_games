@@ -1,4 +1,5 @@
 import os
+import re
 import asyncio
 import aiohttp  # noqa: F401 - used in _install_db at runtime
 import json
@@ -8,12 +9,14 @@ from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register, StarTools
 from astrbot.api import logger, AstrBotConfig
 from astrbot.api.all import Plain, Image, MessageChain
+import astrbot.api.message_components as Comp
 
 from .database import PoetryDB
 from .game.flowing_petals import FlowingPetalsEngine
 from .game.crossword_poetry import PoetryCrosswordEngine
 from .game.snake_poetry import PoetrySnakeEngine
 from .game.guess_verse import GuessVerseEngine, render_grid, render_blank, render_answer, render_hint, _init_plugin_dir
+from .game.guess_verse import pick_battle_target, BattleVerseEngine, render_battle
 
 GITEE_BASE = "https://gitee.com/alin1031/poetry-data/releases/download/v1.0.0/poetry_data.zip"
 GITEE_PROBE = GITEE_BASE + ".part01"  # 探测分片而非基文件（基文件不存在）
@@ -56,6 +59,7 @@ class PoetryPlugin(Star):
         self.verse_min_len = self.config.get("verse_min_len", 5)
         self.verse_max_len = self.config.get("verse_max_len", 10)
         self.guess_verse_sessions = {}
+        self.battle_sessions = {}  # 邀战对战会话
         try:
             _init_plugin_dir(os.path.dirname(os.path.abspath(__file__)))
         except Exception:
@@ -410,6 +414,81 @@ class PoetryPlugin(Star):
         yield event.plain_result(msg)
 
     # ==========================================
+    # ⚔️ 邀战猜诗词（对战）
+    # ==========================================
+    def _extract_at_id(self, event):
+        """提取消息中第一个艾特的 user_id。"""
+        try:
+            msg_obj = getattr(event, "message_obj", None)
+            if msg_obj and hasattr(msg_obj, "message"):
+                for comp in msg_obj.message:
+                    if isinstance(comp, Comp.At):
+                        return str(getattr(comp, "qq", ""))
+        except Exception:
+            pass
+        raw = str(getattr(event, "message_str", "") or "")
+        m = re.search(r"\[CQ:at,qq=(\d+)\]", raw)
+        if m:
+            return m.group(1)
+        m = re.search(r"@(\d{5,12})", raw)
+        if m:
+            return m.group(1)
+        return None
+
+    @filter.command("邀战猜诗词")
+    async def invite_battle(self, event: AstrMessageEvent):
+        group_id = str(event.get_group_id())
+        if not group_id or group_id == "None":
+            yield event.plain_result("邀战猜诗词仅支持群聊哦~")
+            return
+        session_id = str(event.get_group_id() or event.get_session_id())
+        if session_id in self.battle_sessions:
+            yield event.plain_result("当前群已有进行中的邀战对局。")
+            return
+
+        target_id = self._extract_at_id(event)
+        if not target_id:
+            yield event.plain_result("请艾特要挑战的成员，如：/邀战猜诗词 @某人")
+            return
+        sender_id = str(event.get_sender_id())
+        if target_id == sender_id:
+            yield event.plain_result("不能挑战自己哦~")
+            return
+
+        target_name = None
+        try:
+            info = await event.bot.api.call_action("get_group_member_info", group_id=int(group_id), user_id=int(target_id))
+            if isinstance(info, dict) and "data" in info:
+                info = info["data"]
+            target_name = info.get("nickname") or info.get("card") or f"用户{target_id}"
+        except Exception:
+            target_name = f"用户{target_id}"
+
+        self.battle_sessions[session_id] = {
+            "state": "waiting_confirm",
+            "challenger_id": sender_id,
+            "challenger_name": event.get_sender_name() or f"用户{sender_id}",
+            "opponent_id": target_id,
+            "opponent_name": target_name,
+            "engine": None,
+        }
+        yield event.plain_result(
+            f"⚔️ 【邀战猜诗词】\n"
+            f"{event.get_sender_name()} 向 {target_name} 发起挑战！\n"
+            f"规则：随机一句课本古诗（如「对酒当歌，人生几何」），挑战者猜前句，被挑战者猜后句，先猜中自己半句者获胜。\n"
+            f"请 {target_name} 回复【接受】开始对战，或回复【拒绝】。"
+        )
+
+    @filter.command("结束邀战")
+    async def end_battle(self, event: AstrMessageEvent):
+        session_id = str(event.get_group_id() or event.get_session_id())
+        if session_id in self.battle_sessions:
+            self.battle_sessions.pop(session_id)
+            yield event.plain_result("邀战已取消。")
+        else:
+            yield event.plain_result("当前没有进行中的邀战对局。")
+
+    # ==========================================
     # 🤖 Bot 管理指令
     # ==========================================
     @filter.command("bot加入")
@@ -675,6 +754,66 @@ class PoetryPlugin(Star):
         if msg_raw in ("猜诗句", "猜诗句帮助", "结束猜诗句", "猜诗句规则") or msg_raw.startswith("猜诗句 "): return
 
         session_id = str(event.get_group_id() or event.get_session_id())
+
+        # ⚔️ 邀战猜诗词处理
+        if session_id in self.battle_sessions:
+            b = self.battle_sessions[session_id]
+            uid = str(event.get_sender_id())
+
+            # 等待确认阶段
+            if b["state"] == "waiting_confirm":
+                if uid != b["opponent_id"]:
+                    return
+                if msg_raw in ("接受", "同意", "应战"):
+                    poem = pick_battle_target(self.classic_poems)
+                    if not poem:
+                        self.battle_sessions.pop(session_id)
+                        yield event.plain_result("❌ 未找到合适的出题诗句。")
+                        return
+                    engine = BattleVerseEngine(poem, b["challenger_id"], b["challenger_name"], b["opponent_id"], b["opponent_name"])
+                    b["engine"] = engine
+                    b["state"] = "playing"
+                    img_path = os.path.join(str(self.plugin_data_dir), f"battle_{session_id}.png")
+                    render_battle(engine, img_path)
+                    yield event.plain_result(
+                        f"⚔️ 对战开始！\n"
+                        f"答案结构：{len(engine.first)} 字 + {len(engine.second)} 字（前句/后句各半）\n"
+                        f"1号 {engine.first_name} 猜【前句】，2号 {engine.second_name} 猜【后句】\n"
+                        f"先轮到：{engine.current_name()}"
+                    )
+                    yield event.image_result(img_path)
+                    return
+                elif msg_raw in ("拒绝", "拒绝挑战", "不接受"):
+                    self.battle_sessions.pop(session_id)
+                    yield event.plain_result(f"{b['opponent_name']} 拒绝了挑战。")
+                    return
+                return
+
+            # 对战阶段
+            if b["state"] == "playing":
+                engine = b["engine"]
+                if uid not in (engine.first_id, engine.second_id):
+                    return
+                if not engine.is_turn(uid):
+                    yield event.plain_result(f"还没轮到你，当前轮到 {engine.current_name()}。")
+                    return
+                ok, err, side, comp, all_correct = engine.guess(uid, msg_raw)
+                if not ok:
+                    yield event.plain_result(err)
+                    return
+                img_path = os.path.join(str(self.plugin_data_dir), f"battle_{session_id}.png")
+                render_battle(engine, img_path)
+                yield event.image_result(img_path)
+                if all_correct:
+                    wname = engine.first_name if engine.winner == "first" else engine.second_name
+                    yield event.plain_result(
+                        f"🏆 {wname} 猜中了！答案：{engine.first}，{engine.second}{engine.poem['end_punct']}"
+                    )
+                    self.battle_sessions.pop(session_id)
+                else:
+                    engine.switch_turn()
+                    yield event.plain_result(f"轮到 {engine.current_name()}。")
+                return
 
         # 🎯 猜诗句游戏处理
         if session_id in self.guess_verse_sessions:
