@@ -68,6 +68,19 @@ class PoetryPlugin(Star):
         # 加载经典诗词曲库（随插件分发）
         self.plugin_code_dir = os.path.dirname(os.path.abspath(__file__))
         self.classic_poems = self._load_classic_poems()
+        # 教材/经典半句集合（邀战猜测用，命中才当猜测）
+        self.battle_half_set = self._build_battle_half_set()
+
+    def _build_battle_half_set(self):
+        """构建邀战可猜的半句集合：所有经典曲库完整句拆出的前句+后句。"""
+        half_set = set()
+        for p in self.classic_poems:
+            sent = p.get("sentence", "")
+            m = re.match(r'^([\u4e00-\u9fff]{4,6})，([\u4e00-\u9fff]{4,6})[。！？]$', sent)
+            if m:
+                half_set.add(m.group(1))
+                half_set.add(m.group(2))
+        return half_set
 
     def _load_classic_poems(self):
         """加载经典诗词曲库 classic_poems.json。返回 list 或空列表。"""
@@ -471,13 +484,20 @@ class PoetryPlugin(Star):
             "opponent_id": target_id,
             "opponent_name": target_name,
             "engine": None,
+            "created_at": time.time(),
         }
         yield event.plain_result(
             f"⚔️ 【邀战猜诗词】\n"
             f"{event.get_sender_name()} 向 {target_name} 发起挑战！\n"
             f"规则：随机一句课本古诗（如「对酒当歌，人生几何」），挑战者猜前句，被挑战者猜后句，先猜中自己半句者获胜。\n"
-            f"请 {target_name} 回复【接受】开始对战，或回复【拒绝】。"
+            f"请 {target_name} 回复【接受】开始对战，或回复【拒绝】。（2 分钟内有效）"
         )
+        # 启动 2 分钟超时自动取消
+        try:
+            origin = getattr(event, "unified_msg_origin", None)
+            asyncio.create_task(self._battle_confirm_timeout(session_id, origin))
+        except Exception:
+            pass
 
     @filter.command("结束邀战")
     async def end_battle(self, event: AstrMessageEvent):
@@ -696,6 +716,21 @@ class PoetryPlugin(Star):
     # ==========================================
     # 超时监控
     # ==========================================
+    async def _battle_confirm_timeout(self, session_id, msg_origin):
+        """邀战确认 2 分钟超时自动取消。"""
+        try:
+            await asyncio.sleep(120)
+            if session_id in self.battle_sessions:
+                b = self.battle_sessions[session_id]
+                if b.get("state") == "waiting_confirm":
+                    self.battle_sessions.pop(session_id)
+                    if msg_origin:
+                        await self.context.send_message(msg_origin, MessageChain([
+                            Plain("⏰ 挑战超时（2 分钟未响应），已自动取消。")
+                        ]))
+        except Exception as e:
+            logger.error(f"邀战超时任务异常: {e}")
+
     async def _active_timeout_monitor(self, session_id, msg_origin):
         try:
             while session_id in self.active_games:
@@ -762,6 +797,11 @@ class PoetryPlugin(Star):
 
             # 等待确认阶段
             if b["state"] == "waiting_confirm":
+                # 惰性超时检查（2 分钟）
+                if time.time() - b.get("created_at", 0) > 120:
+                    self.battle_sessions.pop(session_id)
+                    yield event.plain_result("⏰ 挑战超时（2 分钟未响应），已自动取消。")
+                    return
                 if uid != b["opponent_id"]:
                     return
                 if msg_raw in ("接受", "同意", "应战"):
@@ -795,7 +835,16 @@ class PoetryPlugin(Star):
                 if uid not in (engine.first_id, engine.second_id):
                     return
                 if not engine.is_turn(uid):
-                    yield event.plain_result(f"还没轮到你，当前轮到 {engine.current_name()}。")
+                    # 没轮到的人静默
+                    return
+                clean = re.sub(r'[^\u4e00-\u9fff]', '', msg_raw)
+                if not clean or len(clean) != len(engine.first_parts):
+                    return
+                # 命中半句集合才当猜测，否则静默
+                if clean not in self.battle_half_set:
+                    yield event.plain_result(
+                        f"「{clean}」不在经典诗词库中，请输入完整的半句诗句进行猜测。"
+                    )
                     return
                 ok, err, side, comp, all_correct = engine.guess(uid, msg_raw)
                 if not ok:
