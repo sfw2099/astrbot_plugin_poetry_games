@@ -83,20 +83,21 @@ class PoetryPlugin(Star):
         return half_set
 
     def _load_classic_poems(self):
-        """加载经典诗词曲库 classic_poems.json。返回 list 或空列表。"""
+        """加载经典诗词曲库。优先 classic_school.json（课本+名句），回退 classic_poems.json。"""
         import json
-        path = os.path.join(self.plugin_code_dir, "classic_poems.json")
-        if not os.path.exists(path):
-            logger.warning(f"[guess_verse] 经典曲库不存在: {path}")
-            return []
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            logger.info(f"[guess_verse] 经典曲库加载成功: {len(data)} 篇")
-            return data
-        except Exception as e:
-            logger.error(f"[guess_verse] 经典曲库加载失败: {e}")
-            return []
+        # 优先「课本+名句」聚焦库
+        for name in ("classic_school.json", "classic_poems.json"):
+            path = os.path.join(self.plugin_code_dir, name)
+            if os.path.exists(path):
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    logger.info(f"[guess_verse] 曲库 {name} 加载成功: {len(data)} 条")
+                    return data
+                except Exception as e:
+                    logger.error(f"[guess_verse] 曲库 {name} 加载失败: {e}")
+        logger.warning("[guess_verse] 未找到曲库文件")
+        return []
 
     def _ensure_db(self):
         """惰性加载数据库"""
