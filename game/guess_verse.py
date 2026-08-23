@@ -183,6 +183,8 @@ class GuessVerseEngine:
         # 经典曲库：list[dict(sentence/hanzi/chars/title/author/dynasty)]
         self.classic_poems = classic_poems or []
         self._classic_sentences = self._build_classic_index()
+        # 曲库完整句的「纯汉字」集合（合规校验用，忽略标点）
+        self._classic_hanzi_set = {p.get("hanzi", "") for p in self.classic_poems if p.get("hanzi")}
         # 声母/韵母状态记录（用于提示功能，静默累积）
         self.initial_status = {}  # 声母 -> correct/present/absent
         self.final_status = {}    # 韵母 -> correct/present/absent
@@ -283,7 +285,7 @@ class GuessVerseEngine:
 
     def guess(self, text):
         """处理一次猜测。返回 (ok, msg, compare_result, all_correct)。
-        输入为含标点的完整句。标点需与答案匹配，汉字做 Wordle 比较。"""
+        输入为含标点的完整句。只按汉字数与答案匹配（标点不限制），汉字做 Wordle 比较。"""
         text = text.strip()
         clean_hanzi = extract_hanzi(text)
         if not clean_hanzi:
@@ -293,12 +295,7 @@ class GuessVerseEngine:
         if len(clean_hanzi) < self.min_len:
             return False, f"诗句最短 {self.min_len} 字（不含标点），当前 {len(clean_hanzi)} 字", None, False
 
-        # 标点匹配校验
-        guess_punct = extract_punct(text)
-        if guess_punct != self.target_punct:
-            return False, "标点位置或类型不匹配，请按格式输入（如：床前明月光，疑是地上霜。）", None, False
-
-        # 合规校验：输入句须在曲库或总库中
+        # 合规校验：输入句须在曲库或总库中（按汉字匹配，忽略标点）
         if not self._is_valid_poem_line(text, clean_hanzi):
             return False, f"「{text}」不是一句完整的古诗，请发送合规诗句", None, False
 
@@ -314,9 +311,9 @@ class GuessVerseEngine:
         return True, "", comp, all_correct
 
     def _is_valid_poem_line(self, text, clean_hanzi):
-        """校验是否为曲库或总库中的完整句。"""
-        # 曲库按完整句匹配（含标点）
-        if text in self._classic_sentences:
+        """校验是否为曲库或总库中的完整句（按汉字匹配，忽略标点）。"""
+        # 曲库按汉字匹配
+        if clean_hanzi in self._classic_hanzi_set:
             return True
         # 回退：总库按汉字匹配
         db = self.db_source
@@ -572,7 +569,7 @@ def render_blank(engine, output_path):
             draw.rounded_rectangle([x, y, x + CELL_W, y + CELL_H], radius=10, fill=CELL_BG, outline=BORDER_COLOR, width=2)
             draw.text((x + CELL_W // 2, y + CELL_H // 2), "□", fill=(170, 170, 175), font=f_blank, anchor="mm")
 
-    footer = f"共 {len(engine.target_hanzi)} 字，按此格式输入含标点的完整句"
+    footer = f"共 {len(engine.target_hanzi)} 字，发送对应字数的完整句（标点不限）"
     draw.text((img_w // 2, img_h - 20), footer, fill=(120, 120, 120), font=f_hint, anchor="mb")
 
     img.save(output_path, "PNG")
