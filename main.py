@@ -541,17 +541,26 @@ class PoetryPlugin(Star):
             return False
 
     def _is_in_library(self, text):
-        """判断诗句是否在总库（119万首）中；总库未装则回退经典曲库单句集合。"""
+        """判断诗句是否在总库（119万首）中；总库未装则回退经典曲库单句集合。
+        同时尝试简体/繁体查询（总库可能繁体存储）。
+        """
         hanzi = re.sub(r'[^\u4e00-\u9fff]', '', text)
         if not hanzi:
             return False
-        # 总库优先
+        # 总库优先（简体 + 繁体各查一次）
         if self.db is not None:
+            queries = [hanzi]
             try:
-                if self.db.is_complete_sentence(hanzi):
-                    return True
+                from opencc import OpenCC
+                queries.append(OpenCC('s2t').convert(hanzi))  # 简体转繁体
             except Exception:
                 pass
+            for q in queries:
+                try:
+                    if self.db.is_complete_sentence(q):
+                        return True
+                except Exception:
+                    continue
         # 回退经典曲库单句集合
         return hanzi in self.classic_clause_set
 
@@ -647,6 +656,8 @@ class PoetryPlugin(Star):
         """
         uid = str(event.get_sender_id())
         group_id = str(event.get_group_id() or "")
+        # 私聊判断：无群号即为私聊（不依赖 is_private_chat，更可靠）
+        is_private = is_private or not group_id or group_id == "None"
 
         async def reply(text):
             """回复到当前消息来源。"""
@@ -664,11 +675,27 @@ class PoetryPlugin(Star):
             if group_id and group_id != "None" and group_id == k:
                 duel, sid = d, k
                 break
-            if is_private and uid in (d.get("challenger_id"), d.get("opponent_id")):
+            if uid in (d.get("challenger_id"), d.get("opponent_id")):
+                # 私聊：按用户匹配（challenger/opponent 匹配即可）
                 duel, sid = d, k
                 break
         if not duel:
             return False
+
+        # 判断是否对垒参与者
+        is_participant = uid in (duel.get("challenger_id"), duel.get("opponent_id"))
+        if not is_participant:
+            # 群聊非参与者：放行（不吞消息，让正常流程/LLM处理）
+            if not is_private:
+                return False
+            # 私聊非参与者：忽略
+            return True
+
+        # 对垒参与者：阻止事件继续传播（避免触发 LLM/其他插件）
+        try:
+            event.stop_event()
+        except Exception:
+            pass
 
         # ===== 等待确认阶段（群聊）=====
         if duel["state"] == "wait_confirm":
@@ -712,9 +739,6 @@ class PoetryPlugin(Star):
             hanzi = re.sub(r'[^\u4e00-\u9fff]', '', clean)
             if len(hanzi) != duel["word_len"]:
                 await reply(f"题目需为 {duel['word_len']} 字，当前 {len(hanzi)} 字。")
-                return True
-            if not self._is_in_library(clean):
-                await reply(f"「{clean}」不在诗词库中，请发送曲库中的诗句。")
                 return True
             duel["puzzles"][uid] = clean
             duel["puzzle_done"].add(uid)
