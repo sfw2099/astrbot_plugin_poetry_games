@@ -764,6 +764,11 @@ class PoetryPlugin(Star):
                 _block_llm()
                 yield event.plain_result(f"题目需为 {duel['word_len']} 字，当前 {len(hanzi)} 字。")
                 return
+            # 出题也校验总库，保证题目可被对方猜中
+            if not self._is_in_library(clean):
+                _block_llm()
+                yield event.plain_result(f"「{clean}」不在诗词库中，请输入曲库诗句作为题目。")
+                return
             duel["puzzles"][uid] = clean
             duel["puzzle_done"].add(uid)
             _block_llm()
