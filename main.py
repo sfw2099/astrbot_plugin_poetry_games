@@ -528,15 +528,32 @@ class PoetryPlugin(Star):
     # 🍵 诗词对垒（双方各出题，互猜对方诗句）
     # ==========================================
     async def _send_private(self, bot, user_id, text):
-        """给指定用户发私聊消息（OneBot send_private_msg）。"""
+        """给指定用户发私聊消息（OneBot send_private_msg）。返回是否成功。"""
         try:
             await bot.api.call_action(
                 "send_private_msg",
                 user_id=int(user_id),
                 message=[{"type": "text", "data": {"text": text}}],
             )
+            return True
         except Exception as e:
             logger.error(f"[duel] 私聊发送失败 user={user_id}: {e}")
+            return False
+
+    def _is_in_library(self, text):
+        """判断诗句是否在总库（119万首）中；总库未装则回退经典曲库单句集合。"""
+        hanzi = re.sub(r'[^\u4e00-\u9fff]', '', text)
+        if not hanzi:
+            return False
+        # 总库优先
+        if self.db is not None:
+            try:
+                if self.db.is_complete_sentence(hanzi):
+                    return True
+            except Exception:
+                pass
+        # 回退经典曲库单句集合
+        return hanzi in self.classic_clause_set
 
     @filter.command("诗词对垒")
     async def start_duel(self, event: AstrMessageEvent):
@@ -664,11 +681,17 @@ class PoetryPlugin(Star):
             if msg_raw in ("接受", "同意", "应战"):
                 duel["state"] = "wait_puzzle"
                 wl = duel["word_len"]
-                await self._send_private(event.bot, duel["challenger_id"],
-                    f"🍵 【诗词对垒】请发送一句 {wl} 字诗句作为你的题目（曲库中，前缀「猜诗句」）。\n例：猜诗句 床前明月光")
-                await self._send_private(event.bot, duel["opponent_id"],
-                    f"🍵 【诗词对垒】请发送一句 {wl} 字诗句作为你的题目（曲库中，前缀「猜诗句」）。\n例：猜诗句 床前明月光")
-                await reply(f"🍵 对垒开始！已私聊双方提示出题（各 {wl} 字），出题完成后在群聊公开互猜。")
+                hint = f"🍵 【诗词对垒】请发送一句 {wl} 字诗句作为你的题目（总库中，前缀「猜诗句」）。\n例：猜诗句 床前明月光"
+                ok_a = await self._send_private(event.bot, duel["challenger_id"], hint)
+                ok_b = await self._send_private(event.bot, duel["opponent_id"], hint)
+                if ok_a and ok_b:
+                    await reply(f"🍵 对垒开始！已私聊双方提示出题（各 {wl} 字），出题完成后在群聊公开互猜。")
+                else:
+                    await reply(
+                        f"⚠️ 私聊出题失败（机器人需与双方互为好友才能私聊）。\n"
+                        f"请先让双方添加机器人为好友，再重新发起对垒。"
+                    )
+                    self.duel_sessions.pop(sid)
                 return True
             elif msg_raw in ("拒绝", "拒绝挑战", "不接受"):
                 self.duel_sessions.pop(sid)
@@ -690,8 +713,8 @@ class PoetryPlugin(Star):
             if len(hanzi) != duel["word_len"]:
                 await reply(f"题目需为 {duel['word_len']} 字，当前 {len(hanzi)} 字。")
                 return True
-            if hanzi not in self.classic_clause_set:
-                await reply(f"「{clean}」不在经典诗词库中，请发送曲库中的诗句。")
+            if not self._is_in_library(clean):
+                await reply(f"「{clean}」不在诗词库中，请发送曲库中的诗句。")
                 return True
             duel["puzzles"][uid] = clean
             duel["puzzle_done"].add(uid)
@@ -729,8 +752,8 @@ class PoetryPlugin(Star):
             hanzi = re.sub(r'[^\u4e00-\u9fff]', '', clean)
             if not hanzi or len(hanzi) != len(engine.target_parts_of(engine.current_side())):
                 return True
-            if hanzi not in self.classic_clause_set:
-                await reply(f"「{clean}」不在经典诗词库中，请输入曲库诗句。")
+            if not self._is_in_library(clean):
+                await reply(f"「{clean}」不在诗词库中，请输入曲库诗句。")
                 return True
             ok, err, side, comp, all_correct = engine.guess(uid, clean)
             if not ok:
