@@ -616,7 +616,7 @@ class PoetryPlugin(Star):
         yield event.plain_result(
             f"🍵 【诗词对垒】\n"
             f"{event.get_sender_name()} 向 {target_name} 发起对垒！\n"
-            f"双方各出 {word_len} 字诗句（曲库中，前缀「猜诗句」）作为题目，随后互猜对方诗句，先猜中者获胜。\n"
+            f"双方各出 {word_len} 字诗句（曲库中，前缀「cc」）作为题目，随后互猜对方诗句，先猜中者获胜。\n"
             f"请 {target_name} 回复【接受】开始，或回复【拒绝】。（2 分钟内有效）"
         )
         try:
@@ -650,7 +650,7 @@ class PoetryPlugin(Star):
             logger.error(f"对垒超时任务异常: {e}")
 
     async def _handle_duel_message(self, event, msg_raw, is_private):
-        """处理诗词对垒相关消息（前缀「猜诗句」）。
+        """处理诗词对垒相关消息（前缀「cc」）。
         私聊：确认/出题；群聊：确认/猜测。
         返回 True 表示已处理（普通 async 函数，用 send_message 发消息）。
         """
@@ -708,7 +708,7 @@ class PoetryPlugin(Star):
             if msg_raw in ("接受", "同意", "应战"):
                 duel["state"] = "wait_puzzle"
                 wl = duel["word_len"]
-                hint = f"🍵 【诗词对垒】请发送一句 {wl} 字诗句作为你的题目（总库中，前缀「猜诗句」）。\n例：猜诗句 床前明月光"
+                hint = f"🍵 【诗词对垒】请发送一句 {wl} 字诗句作为你的题目（总库中，前缀「cc」）。\n例：cc 床前明月光"
                 ok_a = await self._send_private(event.bot, duel["challenger_id"], hint)
                 ok_b = await self._send_private(event.bot, duel["opponent_id"], hint)
                 if ok_a and ok_b:
@@ -735,7 +735,10 @@ class PoetryPlugin(Star):
             if uid in duel["puzzle_done"]:
                 await reply("你已经出过题了，等待对方出题中...")
                 return True
-            clean = re.sub(r'^猜诗句\s*', '', msg_raw).strip()
+            # 出题需 cc 前缀，否则静默忽略（避免刷屏）
+            if not msg_raw.startswith("cc"):
+                return True
+            clean = re.sub(r'^cc\s*', '', msg_raw).strip()
             hanzi = re.sub(r'[^\u4e00-\u9fff]', '', clean)
             if len(hanzi) != duel["word_len"]:
                 await reply(f"题目需为 {duel['word_len']} 字，当前 {len(hanzi)} 字。")
@@ -759,7 +762,7 @@ class PoetryPlugin(Star):
                     await self.context.send_message(origin, MessageChain([
                         Plain(f"🍵 双方已出题！开始互猜！\n"
                               f"{duel['challenger_name']} 猜 {duel['opponent_name']} 的题，{duel['opponent_name']} 猜 {duel['challenger_name']} 的题。\n"
-                              f"先轮到：{engine.current_name()}（发送「猜诗句 诗句」猜测）")
+                              f"先轮到：{engine.current_name()}（发送「cc 诗句」猜测）")
                     ]))
             return True
 
@@ -772,7 +775,10 @@ class PoetryPlugin(Star):
                 return True
             if not engine.is_turn(uid):
                 return True  # 没轮到静默
-            clean = re.sub(r'^猜诗句\s*', '', msg_raw).strip()
+            # 猜测需 cc 前缀，否则静默（防误触）
+            if not msg_raw.startswith("cc"):
+                return True
+            clean = re.sub(r'^cc\s*', '', msg_raw).strip()
             hanzi = re.sub(r'[^\u4e00-\u9fff]', '', clean)
             if not hanzi or len(hanzi) != len(engine.target_parts_of(engine.current_side())):
                 return True
@@ -1084,7 +1090,7 @@ class PoetryPlugin(Star):
         msg_raw = event.message_str.strip()
         # 🍵 诗词对垒处理（优先，含确认/私聊出题/群聊猜测）
         is_private = bool(event.is_private_chat()) if hasattr(event, "is_private_chat") else False
-        if msg_raw.startswith("猜诗句") or self.duel_sessions:
+        if msg_raw.startswith("cc") or self.duel_sessions:
             handled = await self._handle_duel_message(event, msg_raw, is_private)
             if handled:
                 return
