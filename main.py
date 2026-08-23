@@ -649,24 +649,15 @@ class PoetryPlugin(Star):
         except Exception as e:
             logger.error(f"对垒超时任务异常: {e}")
 
-    async def _handle_duel_message(self, event, msg_raw, is_private):
+    async def _handle_duel_message(self, event, msg_raw, is_private, handled):
         """处理诗词对垒相关消息（前缀「cc」）。
         私聊：确认/出题；群聊：确认/猜测。
-        返回 True 表示已处理（普通 async 函数，用 send_message 发消息）。
+        async generator：用 yield 发送消息；handled[0]=True 表示消息已被对垒处理。
         """
         uid = str(event.get_sender_id())
         group_id = str(event.get_group_id() or "")
         # 私聊判断：无群号即为私聊（不依赖 is_private_chat，更可靠）
         is_private = is_private or not group_id or group_id == "None"
-
-        async def reply(text):
-            """回复到当前消息来源。"""
-            try:
-                origin = getattr(event, "unified_msg_origin", None)
-                if origin:
-                    await self.context.send_message(origin, MessageChain([Plain(text)]))
-            except Exception as e:
-                logger.error(f"[duel] 回复失败: {e}")
 
         # 找到当前用户/群相关的对垒会话
         duel = None
@@ -676,21 +667,22 @@ class PoetryPlugin(Star):
                 duel, sid = d, k
                 break
             if uid in (d.get("challenger_id"), d.get("opponent_id")):
-                # 私聊：按用户匹配（challenger/opponent 匹配即可）
                 duel, sid = d, k
                 break
         if not duel:
-            return False
+            return
 
         # 判断是否对垒参与者
         is_participant = uid in (duel.get("challenger_id"), duel.get("opponent_id"))
         if not is_participant:
             # 群聊非参与者：放行（不吞消息，让正常流程/LLM处理）
             if not is_private:
-                return False
+                return
             # 私聊非参与者：忽略
-            return True
+            handled[0] = True
+            return
 
+        handled[0] = True
         # 对垒参与者：阻止事件继续传播（避免触发 LLM/其他插件）
         try:
             event.stop_event()
@@ -701,10 +693,10 @@ class PoetryPlugin(Star):
         if duel["state"] == "wait_confirm":
             if time.time() - duel.get("created_at", 0) > 120:
                 self.duel_sessions.pop(sid)
-                await reply("⏰ 对垒挑战超时，已自动取消。")
-                return True
+                yield event.plain_result("⏰ 对垒挑战超时，已自动取消。")
+                return
             if uid != duel["opponent_id"]:
-                return True  # 非被挑战者，忽略
+                return
             if msg_raw in ("接受", "同意", "应战"):
                 duel["state"] = "wait_puzzle"
                 wl = duel["word_len"]
@@ -712,40 +704,38 @@ class PoetryPlugin(Star):
                 ok_a = await self._send_private(event.bot, duel["challenger_id"], hint)
                 ok_b = await self._send_private(event.bot, duel["opponent_id"], hint)
                 if ok_a and ok_b:
-                    await reply(f"🍵 对垒开始！已私聊双方提示出题（各 {wl} 字），出题完成后在群聊公开互猜。")
+                    yield event.plain_result(f"🍵 对垒开始！已私聊双方提示出题（各 {wl} 字），出题完成后在群聊公开互猜。")
                 else:
-                    await reply(
+                    yield event.plain_result(
                         f"⚠️ 私聊出题失败（机器人需与双方互为好友才能私聊）。\n"
                         f"请先让双方添加机器人为好友，再重新发起对垒。"
                     )
                     self.duel_sessions.pop(sid)
-                return True
+                return
             elif msg_raw in ("拒绝", "拒绝挑战", "不接受"):
                 self.duel_sessions.pop(sid)
-                await reply(f"{duel['opponent_name']} 拒绝了挑战。")
-                return True
-            return True
+                yield event.plain_result(f"{duel['opponent_name']} 拒绝了挑战。")
+                return
+            return
 
         # ===== 出题阶段（私聊）=====
         if duel["state"] == "wait_puzzle":
             if not is_private:
-                return True
-            if uid not in (duel["challenger_id"], duel["opponent_id"]):
-                return True
+                return
             if uid in duel["puzzle_done"]:
-                await reply("你已经出过题了，等待对方出题中...")
-                return True
+                yield event.plain_result("你已经出过题了，等待对方出题中...")
+                return
             # 出题需 cc 前缀，否则静默忽略（避免刷屏）
             if not msg_raw.startswith("cc"):
-                return True
+                return
             clean = re.sub(r'^cc\s*', '', msg_raw).strip()
             hanzi = re.sub(r'[^\u4e00-\u9fff]', '', clean)
             if len(hanzi) != duel["word_len"]:
-                await reply(f"题目需为 {duel['word_len']} 字，当前 {len(hanzi)} 字。")
-                return True
+                yield event.plain_result(f"题目需为 {duel['word_len']} 字，当前 {len(hanzi)} 字。")
+                return
             duel["puzzles"][uid] = clean
             duel["puzzle_done"].add(uid)
-            await reply(f"✅ 出题成功！题目：{clean}。等待对方出题...")
+            yield event.plain_result(f"✅ 出题成功！题目：{clean}。等待对方出题...")
             # 双方都出题后进入猜测阶段
             if len(duel["puzzle_done"]) >= 2:
                 a_id = duel["challenger_id"]
@@ -764,43 +754,35 @@ class PoetryPlugin(Star):
                               f"{duel['challenger_name']} 猜 {duel['opponent_name']} 的题，{duel['opponent_name']} 猜 {duel['challenger_name']} 的题。\n"
                               f"先轮到：{engine.current_name()}（发送「cc 诗句」猜测）")
                     ]))
-            return True
+            return
 
         # ===== 猜测阶段（群聊）=====
         if duel["state"] == "playing":
             engine = duel["engine"]
             if is_private:
-                return True
-            if uid not in (engine.a_id, engine.b_id):
-                return True
+                return
             if not engine.is_turn(uid):
-                return True  # 没轮到静默
+                return  # 没轮到静默
             # 猜测需 cc 前缀，否则静默（防误触）
             if not msg_raw.startswith("cc"):
-                return True
+                return
             clean = re.sub(r'^cc\s*', '', msg_raw).strip()
             hanzi = re.sub(r'[^\u4e00-\u9fff]', '', clean)
             if not hanzi or len(hanzi) != len(engine.target_parts_of(engine.current_side())):
-                return True
+                return
             if not self._is_in_library(clean):
-                await reply(f"「{clean}」不在诗词库中，请输入曲库诗句。")
-                return True
+                yield event.plain_result(f"「{clean}」不在诗词库中，请输入曲库诗句。")
+                return
             ok, err, side, comp, all_correct = engine.guess(uid, clean)
             if not ok:
-                await reply(err)
-                return True
+                yield event.plain_result(err)
+                return
             img_path = os.path.join(str(self.plugin_data_dir), f"duel_{sid}.png")
             render_duel(engine, img_path)
-            # 发送棋盘图片
-            try:
-                origin = getattr(event, "unified_msg_origin", None)
-                if origin:
-                    await self.context.send_message(origin, MessageChain([Image.fromFileSystem(img_path)]))
-            except Exception as e:
-                logger.error(f"[duel] 图片发送失败: {e}")
+            yield event.image_result(img_path)
             if all_correct:
                 wname = engine.side_name(side)
-                await reply(
+                yield event.plain_result(
                     f"🏆 {wname} 猜中了对方的诗句！\n"
                     f"{engine.a_name} 的题：{engine.a_puzzle}\n"
                     f"{engine.b_name} 的题：{engine.b_puzzle}"
@@ -808,10 +790,8 @@ class PoetryPlugin(Star):
                 self.duel_sessions.pop(sid)
             else:
                 engine.switch_turn()
-                await reply(f"轮到 {engine.current_name()}。")
-            return True
-
-        return False
+                yield event.plain_result(f"轮到 {engine.current_name()}。")
+            return
 
     # ==========================================
     # 🤖 Bot 管理指令
@@ -1091,8 +1071,10 @@ class PoetryPlugin(Star):
         # 🍵 诗词对垒处理（优先，含确认/私聊出题/群聊猜测）
         is_private = bool(event.is_private_chat()) if hasattr(event, "is_private_chat") else False
         if msg_raw.startswith("cc") or self.duel_sessions:
-            handled = await self._handle_duel_message(event, msg_raw, is_private)
-            if handled:
+            handled = [False]
+            async for result in self._handle_duel_message(event, msg_raw, is_private, handled):
+                yield result
+            if handled[0]:
                 return
         if msg_raw.startswith(("(", "（")) and msg_raw.endswith((")", "）")): return
         if not msg_raw or msg_raw.startswith(("/", "查询", "生成战报", "恢复", "结束", "纵横", "衔字", "蛇形", "删除", "安装", "bot")): return
