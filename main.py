@@ -626,21 +626,28 @@ class PoetryPlugin(Star):
     async def _handle_duel_message(self, event, msg_raw, is_private):
         """处理诗词对垒相关消息（前缀「猜诗句」）。
         私聊：确认/出题；群聊：确认/猜测。
-        返回 True 表示已处理。
+        返回 True 表示已处理（普通 async 函数，用 send_message 发消息）。
         """
         uid = str(event.get_sender_id())
         group_id = str(event.get_group_id() or "")
+
+        async def reply(text):
+            """回复到当前消息来源。"""
+            try:
+                origin = getattr(event, "unified_msg_origin", None)
+                if origin:
+                    await self.context.send_message(origin, MessageChain([Plain(text)]))
+            except Exception as e:
+                logger.error(f"[duel] 回复失败: {e}")
 
         # 找到当前用户/群相关的对垒会话
         duel = None
         sid = None
         for k, d in self.duel_sessions.items():
-            # 群聊按群匹配，私聊按用户匹配
             if group_id and group_id != "None" and group_id == k:
                 duel, sid = d, k
                 break
             if is_private and uid in (d.get("challenger_id"), d.get("opponent_id")):
-                # 私聊需找到对应群会话（challenger/opponent 匹配即可）
                 duel, sid = d, k
                 break
         if not duel:
@@ -650,50 +657,45 @@ class PoetryPlugin(Star):
         if duel["state"] == "wait_confirm":
             if time.time() - duel.get("created_at", 0) > 120:
                 self.duel_sessions.pop(sid)
-                yield event.plain_result("⏰ 对垒挑战超时，已自动取消。")
+                await reply("⏰ 对垒挑战超时，已自动取消。")
                 return True
             if uid != duel["opponent_id"]:
                 return True  # 非被挑战者，忽略
             if msg_raw in ("接受", "同意", "应战"):
                 duel["state"] = "wait_puzzle"
-                # 私聊双方提示出题
                 wl = duel["word_len"]
                 await self._send_private(event.bot, duel["challenger_id"],
                     f"🍵 【诗词对垒】请发送一句 {wl} 字诗句作为你的题目（曲库中，前缀「猜诗句」）。\n例：猜诗句 床前明月光")
                 await self._send_private(event.bot, duel["opponent_id"],
                     f"🍵 【诗词对垒】请发送一句 {wl} 字诗句作为你的题目（曲库中，前缀「猜诗句」）。\n例：猜诗句 床前明月光")
-                yield event.plain_result(f"🍵 对垒开始！已私聊双方提示出题（各 {wl} 字），出题完成后在群聊公开互猜。")
+                await reply(f"🍵 对垒开始！已私聊双方提示出题（各 {wl} 字），出题完成后在群聊公开互猜。")
                 return True
             elif msg_raw in ("拒绝", "拒绝挑战", "不接受"):
                 self.duel_sessions.pop(sid)
-                yield event.plain_result(f"{duel['opponent_name']} 拒绝了挑战。")
+                await reply(f"{duel['opponent_name']} 拒绝了挑战。")
                 return True
             return True
 
         # ===== 出题阶段（私聊）=====
         if duel["state"] == "wait_puzzle":
             if not is_private:
-                # 群聊消息不处理出题，忽略
                 return True
             if uid not in (duel["challenger_id"], duel["opponent_id"]):
                 return True
             if uid in duel["puzzle_done"]:
-                yield event.plain_result("你已经出过题了，等待对方出题中...")
+                await reply("你已经出过题了，等待对方出题中...")
                 return True
-            # 提取"猜诗句"后的内容
             clean = re.sub(r'^猜诗句\s*', '', msg_raw).strip()
             hanzi = re.sub(r'[^\u4e00-\u9fff]', '', clean)
             if len(hanzi) != duel["word_len"]:
-                yield event.plain_result(f"题目需为 {duel['word_len']} 字，当前 {len(hanzi)} 字。")
+                await reply(f"题目需为 {duel['word_len']} 字，当前 {len(hanzi)} 字。")
                 return True
-            # 校验是否在曲库（单句）
             if hanzi not in self.classic_clause_set:
-                yield event.plain_result(f"「{clean}」不在经典诗词库中，请发送曲库中的诗句。")
+                await reply(f"「{clean}」不在经典诗词库中，请发送曲库中的诗句。")
                 return True
             duel["puzzles"][uid] = clean
             duel["puzzle_done"].add(uid)
-            name = duel["challenger_name"] if uid == duel["challenger_id"] else duel["opponent_name"]
-            yield event.plain_result(f"✅ 出题成功！题目：{clean}。等待对方出题...")
+            await reply(f"✅ 出题成功！题目：{clean}。等待对方出题...")
             # 双方都出题后进入猜测阶段
             if len(duel["puzzle_done"]) >= 2:
                 a_id = duel["challenger_id"]
@@ -705,7 +707,6 @@ class PoetryPlugin(Star):
                 )
                 duel["engine"] = engine
                 duel["state"] = "playing"
-                # 群聊宣布开始（用保存的群聊 origin）
                 origin = duel.get("group_origin")
                 if origin:
                     await self.context.send_message(origin, MessageChain([
@@ -718,7 +719,6 @@ class PoetryPlugin(Star):
         # ===== 猜测阶段（群聊）=====
         if duel["state"] == "playing":
             engine = duel["engine"]
-            # 群聊才猜测；私聊忽略
             if is_private:
                 return True
             if uid not in (engine.a_id, engine.b_id):
@@ -729,21 +729,25 @@ class PoetryPlugin(Star):
             hanzi = re.sub(r'[^\u4e00-\u9fff]', '', clean)
             if not hanzi or len(hanzi) != len(engine.target_parts_of(engine.current_side())):
                 return True
-            # 猜测需在曲库中（防止乱输）
             if hanzi not in self.classic_clause_set:
-                yield event.plain_result(f"「{clean}」不在经典诗词库中，请输入曲库诗句。")
+                await reply(f"「{clean}」不在经典诗词库中，请输入曲库诗句。")
                 return True
             ok, err, side, comp, all_correct = engine.guess(uid, clean)
             if not ok:
-                yield event.plain_result(err)
+                await reply(err)
                 return True
             img_path = os.path.join(str(self.plugin_data_dir), f"duel_{sid}.png")
             render_duel(engine, img_path)
-            yield event.image_result(img_path)
+            # 发送棋盘图片
+            try:
+                origin = getattr(event, "unified_msg_origin", None)
+                if origin:
+                    await self.context.send_message(origin, MessageChain([Image.fromFileSystem(img_path)]))
+            except Exception as e:
+                logger.error(f"[duel] 图片发送失败: {e}")
             if all_correct:
                 wname = engine.side_name(side)
-                # 展示双方题目
-                yield event.plain_result(
+                await reply(
                     f"🏆 {wname} 猜中了对方的诗句！\n"
                     f"{engine.a_name} 的题：{engine.a_puzzle}\n"
                     f"{engine.b_name} 的题：{engine.b_puzzle}"
@@ -751,7 +755,7 @@ class PoetryPlugin(Star):
                 self.duel_sessions.pop(sid)
             else:
                 engine.switch_turn()
-                yield event.plain_result(f"轮到 {engine.current_name()}。")
+                await reply(f"轮到 {engine.current_name()}。")
             return True
 
         return False
