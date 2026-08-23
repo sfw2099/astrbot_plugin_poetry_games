@@ -875,3 +875,154 @@ def _draw_battle_row(draw, x0, y, n, cell_w, cell_h, gap, parts, comp, f_char, f
             if tone:
                 segments.append((tone, tone_color, f_py, 6))
             _draw_pinyin_joined(draw, x + cell_w // 2, py_mid, segments)
+
+
+# ============ 诗词对垒（互猜对方诗句）============
+
+
+def pick_puzzle_verse(classic_poems, word_len):
+    """从曲库随机选一句纯汉字数恰好为 word_len 的诗句（含标点）。返回 sentence 或 None。"""
+    cands = [p.get("sentence", "") for p in classic_poems
+             if len(extract_hanzi(p.get("sentence", ""))) == word_len]
+    if not cands:
+        return None
+    return random.choice(cands)
+
+
+class DuelVerseEngine:
+    """诗词对垒引擎：双方各出题（4-7字），互相猜对方诗句，先猜中者胜。
+
+    出题字数在创建时统一，双方同字数。
+    """
+
+    def __init__(self, a_puzzle, b_puzzle, a_id, a_name, b_id, b_name):
+        # a 是挑战者，b 是被挑战者
+        self.a_id = str(a_id)
+        self.a_name = a_name
+        self.b_id = str(b_id)
+        self.b_name = b_name
+        # 各自出的题
+        self.a_puzzle = a_puzzle
+        self.b_puzzle = b_puzzle
+        # 各自要猜的目标（对方出的题）
+        self.a_target_parts = decompose_text(b_puzzle)  # A 猜 B 的题
+        self.b_target_parts = decompose_text(a_puzzle)  # B 猜 A 的题
+        # 各自猜测历史
+        self.a_history = []  # [(text, parts, comp)] A 猜 B 题
+        self.b_history = []  # [(text, parts, comp)] B 猜 A 题
+        self.current = "a"
+        self.winner = None
+        self.round = 0
+
+    def guess(self, user_id, text):
+        """处理某位玩家的猜测（猜对方诗句）。返回 (ok, msg, side, comp, all_correct)。"""
+        uid = str(user_id)
+        clean = extract_hanzi(text)
+        if not clean:
+            return False, "请输入汉字诗句", None, None, False
+
+        side = "a" if uid == self.a_id else "b"
+        target_parts = self.a_target_parts if side == "a" else self.b_target_parts
+        target_len = len(target_parts)
+
+        if len(clean) != target_len:
+            return False, f"对方诗句是 {target_len} 个字，当前 {len(clean)} 字", side, None, False
+
+        guess_parts = decompose_text(clean)
+        comp = compare_guess(guess_parts, target_parts)
+        if side == "a":
+            self.a_history.append((clean, guess_parts, comp))
+        else:
+            self.b_history.append((clean, guess_parts, comp))
+
+        all_correct = all(c is not None and all(v == "correct" for v in c.values()) for c in comp)
+        if all_correct:
+            self.winner = side
+        return True, "", side, comp, all_correct
+
+    def switch_turn(self):
+        self.round += 1
+        self.current = "b" if self.current == "a" else "a"
+
+    def is_turn(self, user_id):
+        return str(user_id) == (self.a_id if self.current == "a" else self.b_id)
+
+    def current_name(self):
+        return self.a_name if self.current == "a" else self.b_name
+
+    def side_name(self, side):
+        return self.a_name if side == "a" else self.b_name
+
+    def current_side(self):
+        return self.current
+
+    def target_parts_of(self, side):
+        return self.a_target_parts if side == "a" else self.b_target_parts
+
+    def history_of(self, side):
+        return self.a_history if side == "a" else self.b_history
+
+
+def render_duel(engine, output_path):
+    """渲染诗词对垒棋盘：左=A猜B的题，右=B猜A的题。"""
+    n = len(engine.a_target_parts)
+    pad = 30
+    header_h = 70
+    sub_h = 50
+    cell_h = 150
+    gap = 8
+    cell_w = 120
+    mid_gap = 40
+
+    rows_a = max(1, len(engine.a_history))
+    rows_b = max(1, len(engine.b_history))
+    n_rows = max(rows_a, rows_b)
+
+    side_w = n * cell_w + (n - 1) * gap
+    img_w = pad * 2 + side_w * 2 + mid_gap
+    img_h = pad + header_h + sub_h + (n_rows + 1) * (cell_h + gap) + 70
+
+    img = Image.new("RGB", (img_w, img_h), (250, 250, 252))
+    draw = ImageDraw.Draw(img)
+
+    f_title = _get_font(28)
+    f_sub = _get_font(20)
+    f_char = _get_font(50)
+    f_py = _get_font(26)
+    f_hint = _get_font(14)
+
+    draw.text((img_w // 2, 18), "诗词对垒", fill=(30, 30, 30), font=f_title, anchor="mt")
+
+    x_left = pad
+    x_right = pad + side_w + mid_gap
+
+    draw.text((x_left + side_w // 2, pad + header_h - 20), f"{engine.a_name} 猜 {engine.b_name} 的题", fill=(40, 40, 40), font=f_sub, anchor="mm")
+    draw.text((x_right + side_w // 2, pad + header_h - 20), f"{engine.b_name} 猜 {engine.a_name} 的题", fill=(40, 40, 40), font=f_sub, anchor="mm")
+
+    y0 = pad + header_h + sub_h
+
+    # 首行空白框
+    for x0 in (x_left, x_right):
+        for i in range(n):
+            x = x0 + i * (cell_w + gap)
+            draw.rounded_rectangle([x, y0, x + cell_w, y0 + cell_h], radius=8, fill=CELL_BG, outline=BORDER_COLOR, width=2)
+
+    # 猜测历史
+    for row_idx in range(n_rows):
+        y = y0 + (row_idx + 1) * (cell_h + gap)
+        if row_idx < len(engine.a_history):
+            _draw_battle_row(draw, x_left, y, n, cell_w, cell_h, gap,
+                             engine.a_history[row_idx][1], engine.a_history[row_idx][2], f_char, f_py)
+        if row_idx < len(engine.b_history):
+            _draw_battle_row(draw, x_right, y, n, cell_w, cell_h, gap,
+                             engine.b_history[row_idx][1], engine.b_history[row_idx][2], f_char, f_py)
+
+    if engine.winner:
+        wname = engine.side_name(engine.winner)
+        footer = f"🏆 {wname} 猜中了对方的诗句！"
+    else:
+        footer = f"轮到：{engine.current_name()}"
+    draw.text((img_w // 2, img_h - 20), footer, fill=(120, 120, 120), font=f_hint, anchor="mb")
+
+    img.save(output_path, "PNG")
+    return output_path

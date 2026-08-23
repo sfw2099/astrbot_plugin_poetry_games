@@ -17,6 +17,7 @@ from .game.crossword_poetry import PoetryCrosswordEngine
 from .game.snake_poetry import PoetrySnakeEngine
 from .game.guess_verse import GuessVerseEngine, render_grid, render_blank, render_answer, render_hint, _init_plugin_dir
 from .game.guess_verse import pick_battle_target, BattleVerseEngine, render_battle
+from .game.guess_verse import DuelVerseEngine, render_duel, pick_puzzle_verse
 
 GITEE_BASE = "https://gitee.com/alin1031/poetry-data/releases/download/v1.0.0/poetry_data.zip"
 GITEE_PROBE = GITEE_BASE + ".part01"  # 探测分片而非基文件（基文件不存在）
@@ -60,6 +61,7 @@ class PoetryPlugin(Star):
         self.verse_max_len = self.config.get("verse_max_len", 10)
         self.guess_verse_sessions = {}
         self.battle_sessions = {}  # 邀战对战会话
+        self.duel_sessions = {}    # 诗词对垒会话
         try:
             _init_plugin_dir(os.path.dirname(os.path.abspath(__file__)))
         except Exception:
@@ -70,6 +72,19 @@ class PoetryPlugin(Star):
         self.classic_poems = self._load_classic_poems()
         # 教材/经典半句集合（邀战猜测用，命中才当猜测）
         self.battle_half_set = self._build_battle_half_set()
+        # 经典单句集合（4-7字，对垒出题/猜测用）
+        self.classic_clause_set = self._build_classic_clause_set()
+
+    def _build_classic_clause_set(self):
+        """构建经典单句集合：所有完整句按逗号/顿号拆出的 4-7 字单句。"""
+        clause_set = set()
+        for p in self.classic_poems:
+            sent = p.get("sentence", "")
+            for clause in re.split(r'[，、]', sent):
+                pure = re.sub(r'[^\u4e00-\u9fff]', '', clause)
+                if 4 <= len(pure) <= 7:
+                    clause_set.add(pure)
+        return clause_set
 
     def _build_battle_half_set(self):
         """构建邀战可猜的半句集合：所有经典曲库完整句拆出的前句+后句。"""
@@ -510,6 +525,238 @@ class PoetryPlugin(Star):
             yield event.plain_result("当前没有进行中的邀战对局。")
 
     # ==========================================
+    # 🍵 诗词对垒（双方各出题，互猜对方诗句）
+    # ==========================================
+    async def _send_private(self, bot, user_id, text):
+        """给指定用户发私聊消息（OneBot send_private_msg）。"""
+        try:
+            await bot.api.call_action(
+                "send_private_msg",
+                user_id=int(user_id),
+                message=[{"type": "text", "data": {"text": text}}],
+            )
+        except Exception as e:
+            logger.error(f"[duel] 私聊发送失败 user={user_id}: {e}")
+
+    @filter.command("诗词对垒")
+    async def start_duel(self, event: AstrMessageEvent):
+        group_id = str(event.get_group_id())
+        if not group_id or group_id == "None":
+            yield event.plain_result("诗词对垒仅支持群聊哦~")
+            return
+        session_id = group_id
+        if session_id in self.duel_sessions:
+            yield event.plain_result("当前群已有进行中的诗词对垒。")
+            return
+        if session_id in self.battle_sessions:
+            yield event.plain_result("当前群已有进行中的邀战对局，请先结束。")
+            return
+
+        target_id = self._extract_at_id(event)
+        if not target_id:
+            yield event.plain_result("请艾特要挑战的成员，如：/诗词对垒 @某人")
+            return
+        sender_id = str(event.get_sender_id())
+        if target_id == sender_id:
+            yield event.plain_result("不能挑战自己哦~")
+            return
+
+        target_name = f"用户{target_id}"
+        try:
+            info = await event.bot.api.call_action("get_group_member_info", group_id=int(group_id), user_id=int(target_id))
+            if isinstance(info, dict) and "data" in info:
+                info = info["data"]
+            target_name = info.get("nickname") or info.get("card") or target_name
+        except Exception:
+            pass
+
+        # 随机出题字数 4-7
+        import random as _r
+        word_len = _r.choice([4, 5, 6, 7])
+
+        self.duel_sessions[session_id] = {
+            "state": "wait_confirm",
+            "challenger_id": sender_id,
+            "challenger_name": event.get_sender_name() or f"用户{sender_id}",
+            "opponent_id": target_id,
+            "opponent_name": target_name,
+            "word_len": word_len,
+            "puzzles": {},        # {user_id: sentence}
+            "puzzle_done": set(), # 已出题的人
+            "engine": None,
+            "group_origin": getattr(event, "unified_msg_origin", None),
+            "created_at": time.time(),
+        }
+        yield event.plain_result(
+            f"🍵 【诗词对垒】\n"
+            f"{event.get_sender_name()} 向 {target_name} 发起对垒！\n"
+            f"双方各出 {word_len} 字诗句（曲库中，前缀「猜诗句」）作为题目，随后互猜对方诗句，先猜中者获胜。\n"
+            f"请 {target_name} 回复【接受】开始，或回复【拒绝】。（2 分钟内有效）"
+        )
+        try:
+            origin = getattr(event, "unified_msg_origin", None)
+            asyncio.create_task(self._duel_confirm_timeout(session_id, origin))
+        except Exception:
+            pass
+
+    @filter.command("结束对垒")
+    async def end_duel(self, event: AstrMessageEvent):
+        session_id = str(event.get_group_id() or event.get_session_id())
+        if session_id in self.duel_sessions:
+            self.duel_sessions.pop(session_id)
+            yield event.plain_result("对垒已取消。")
+        else:
+            yield event.plain_result("当前没有进行中的诗词对垒。")
+
+    async def _duel_confirm_timeout(self, session_id, msg_origin):
+        """对垒确认 2 分钟超时自动取消。"""
+        try:
+            await asyncio.sleep(120)
+            if session_id in self.duel_sessions:
+                d = self.duel_sessions[session_id]
+                if d.get("state") == "wait_confirm":
+                    self.duel_sessions.pop(session_id)
+                    if msg_origin:
+                        await self.context.send_message(msg_origin, MessageChain([
+                            Plain("⏰ 对垒挑战超时（2 分钟未响应），已自动取消。")
+                        ]))
+        except Exception as e:
+            logger.error(f"对垒超时任务异常: {e}")
+
+    async def _handle_duel_message(self, event, msg_raw, is_private):
+        """处理诗词对垒相关消息（前缀「猜诗句」）。
+        私聊：确认/出题；群聊：确认/猜测。
+        返回 True 表示已处理。
+        """
+        uid = str(event.get_sender_id())
+        group_id = str(event.get_group_id() or "")
+
+        # 找到当前用户/群相关的对垒会话
+        duel = None
+        sid = None
+        for k, d in self.duel_sessions.items():
+            # 群聊按群匹配，私聊按用户匹配
+            if group_id and group_id != "None" and group_id == k:
+                duel, sid = d, k
+                break
+            if is_private and uid in (d.get("challenger_id"), d.get("opponent_id")):
+                # 私聊需找到对应群会话（challenger/opponent 匹配即可）
+                duel, sid = d, k
+                break
+        if not duel:
+            return False
+
+        # ===== 等待确认阶段（群聊）=====
+        if duel["state"] == "wait_confirm":
+            if time.time() - duel.get("created_at", 0) > 120:
+                self.duel_sessions.pop(sid)
+                yield event.plain_result("⏰ 对垒挑战超时，已自动取消。")
+                return True
+            if uid != duel["opponent_id"]:
+                return True  # 非被挑战者，忽略
+            if msg_raw in ("接受", "同意", "应战"):
+                duel["state"] = "wait_puzzle"
+                # 私聊双方提示出题
+                wl = duel["word_len"]
+                await self._send_private(event.bot, duel["challenger_id"],
+                    f"🍵 【诗词对垒】请发送一句 {wl} 字诗句作为你的题目（曲库中，前缀「猜诗句」）。\n例：猜诗句 床前明月光")
+                await self._send_private(event.bot, duel["opponent_id"],
+                    f"🍵 【诗词对垒】请发送一句 {wl} 字诗句作为你的题目（曲库中，前缀「猜诗句」）。\n例：猜诗句 床前明月光")
+                yield event.plain_result(f"🍵 对垒开始！已私聊双方提示出题（各 {wl} 字），出题完成后在群聊公开互猜。")
+                return True
+            elif msg_raw in ("拒绝", "拒绝挑战", "不接受"):
+                self.duel_sessions.pop(sid)
+                yield event.plain_result(f"{duel['opponent_name']} 拒绝了挑战。")
+                return True
+            return True
+
+        # ===== 出题阶段（私聊）=====
+        if duel["state"] == "wait_puzzle":
+            if not is_private:
+                # 群聊消息不处理出题，忽略
+                return True
+            if uid not in (duel["challenger_id"], duel["opponent_id"]):
+                return True
+            if uid in duel["puzzle_done"]:
+                yield event.plain_result("你已经出过题了，等待对方出题中...")
+                return True
+            # 提取"猜诗句"后的内容
+            clean = re.sub(r'^猜诗句\s*', '', msg_raw).strip()
+            hanzi = re.sub(r'[^\u4e00-\u9fff]', '', clean)
+            if len(hanzi) != duel["word_len"]:
+                yield event.plain_result(f"题目需为 {duel['word_len']} 字，当前 {len(hanzi)} 字。")
+                return True
+            # 校验是否在曲库（单句）
+            if hanzi not in self.classic_clause_set:
+                yield event.plain_result(f"「{clean}」不在经典诗词库中，请发送曲库中的诗句。")
+                return True
+            duel["puzzles"][uid] = clean
+            duel["puzzle_done"].add(uid)
+            name = duel["challenger_name"] if uid == duel["challenger_id"] else duel["opponent_name"]
+            yield event.plain_result(f"✅ 出题成功！题目：{clean}。等待对方出题...")
+            # 双方都出题后进入猜测阶段
+            if len(duel["puzzle_done"]) >= 2:
+                a_id = duel["challenger_id"]
+                b_id = duel["opponent_id"]
+                engine = DuelVerseEngine(
+                    duel["puzzles"][a_id], duel["puzzles"][b_id],
+                    a_id, duel["challenger_name"],
+                    b_id, duel["opponent_name"],
+                )
+                duel["engine"] = engine
+                duel["state"] = "playing"
+                # 群聊宣布开始（用保存的群聊 origin）
+                origin = duel.get("group_origin")
+                if origin:
+                    await self.context.send_message(origin, MessageChain([
+                        Plain(f"🍵 双方已出题！开始互猜！\n"
+                              f"{duel['challenger_name']} 猜 {duel['opponent_name']} 的题，{duel['opponent_name']} 猜 {duel['challenger_name']} 的题。\n"
+                              f"先轮到：{engine.current_name()}（发送「猜诗句 诗句」猜测）")
+                    ]))
+            return True
+
+        # ===== 猜测阶段（群聊）=====
+        if duel["state"] == "playing":
+            engine = duel["engine"]
+            # 群聊才猜测；私聊忽略
+            if is_private:
+                return True
+            if uid not in (engine.a_id, engine.b_id):
+                return True
+            if not engine.is_turn(uid):
+                return True  # 没轮到静默
+            clean = re.sub(r'^猜诗句\s*', '', msg_raw).strip()
+            hanzi = re.sub(r'[^\u4e00-\u9fff]', '', clean)
+            if not hanzi or len(hanzi) != len(engine.target_parts_of(engine.current_side())):
+                return True
+            # 猜测需在曲库中（防止乱输）
+            if hanzi not in self.classic_clause_set:
+                yield event.plain_result(f"「{clean}」不在经典诗词库中，请输入曲库诗句。")
+                return True
+            ok, err, side, comp, all_correct = engine.guess(uid, clean)
+            if not ok:
+                yield event.plain_result(err)
+                return True
+            img_path = os.path.join(str(self.plugin_data_dir), f"duel_{sid}.png")
+            render_duel(engine, img_path)
+            yield event.image_result(img_path)
+            if all_correct:
+                wname = engine.side_name(side)
+                # 展示双方题目
+                yield event.plain_result(
+                    f"🏆 {wname} 猜中了对方的诗句！\n"
+                    f"{engine.a_name} 的题：{engine.a_puzzle}\n"
+                    f"{engine.b_name} 的题：{engine.b_puzzle}"
+                )
+                self.duel_sessions.pop(sid)
+            else:
+                engine.switch_turn()
+                yield event.plain_result(f"轮到 {engine.current_name()}。")
+            return True
+
+        return False
+
+    # ==========================================
     # 🤖 Bot 管理指令
     # ==========================================
     @filter.command("bot加入")
@@ -784,6 +1031,12 @@ class PoetryPlugin(Star):
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def handle_recv_msg(self, event: AstrMessageEvent):
         msg_raw = event.message_str.strip()
+        # 🍵 诗词对垒处理（优先，含确认/私聊出题/群聊猜测）
+        is_private = bool(event.is_private_chat()) if hasattr(event, "is_private_chat") else False
+        if msg_raw.startswith("猜诗句") or self.duel_sessions:
+            handled = await self._handle_duel_message(event, msg_raw, is_private)
+            if handled:
+                return
         if msg_raw.startswith(("(", "（")) and msg_raw.endswith((")", "）")): return
         if not msg_raw or msg_raw.startswith(("/", "查询", "生成战报", "恢复", "结束", "纵横", "衔字", "蛇形", "删除", "安装", "bot")): return
         # 显式排除猜诗句相关指令词，避免被当作猜测
