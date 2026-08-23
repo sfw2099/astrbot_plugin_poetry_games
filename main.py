@@ -544,6 +544,8 @@ class PoetryPlugin(Star):
         """判断诗句是否在总库（119万首）中；总库未装则回退经典曲库单句集合。
         同时尝试简体/繁体查询（总库可能繁体存储）。
         """
+        # 确保总库已加载（惰性加载，DB 存在才启用）
+        self._ensure_db()
         hanzi = re.sub(r'[^\u4e00-\u9fff]', '', text)
         if not hanzi:
             return False
