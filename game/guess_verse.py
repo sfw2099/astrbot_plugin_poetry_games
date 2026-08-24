@@ -164,6 +164,24 @@ def compare_guess(guess_parts, answer_parts):
     return result
 
 
+def _build_syllable_set(parts):
+    """构建目标诗句的音节集合（声母+韵母 组合，忽略声调）。用于下划线提示。"""
+    return {(p.get("initial", ""), p.get("final", "")) for p in parts if p.get("initial") and p.get("final")}
+
+
+def _syllable_underlined(gp, cell, syllable_set):
+    """判断某格是否需加下划线：音节(声母+韵母)在原句中出现过，且整字未完全正确（非绿色）。"""
+    if gp is None or cell is None:
+        return False
+    if cell.get("char") == "correct":
+        return False
+    initial = gp.get("initial", "")
+    final = gp.get("final", "")
+    if not initial or not final:
+        return False
+    return (initial, final) in syllable_set
+
+
 class GuessVerseEngine:
     """猜诗句游戏引擎（单机，无存档）—— 完整句含标点"""
 
@@ -417,9 +435,10 @@ def _draw_pinyin_joined(draw, x_center, y_mid, segments):
 
     segments: [(text, color, font, gap_before), ...]
     y_mid: 垂直中线坐标，每段用 anchor='lm' 对齐到同一中线。
+    返回渲染总宽度（像素），供下划线定位使用。
     """
     if not segments:
-        return
+        return 0
     gaps = [seg[3] if len(seg) > 3 else 0 for seg in segments]
     total_w = sum(_text_width(draw, seg[0], seg[2]) for seg in segments) + sum(gaps)
     cur_x = x_center - total_w // 2
@@ -428,6 +447,23 @@ def _draw_pinyin_joined(draw, x_center, y_mid, segments):
         cur_x += gaps[i]
         draw.text((cur_x, y_mid), text, fill=color, font=font, anchor="lm")
         cur_x += _text_width(draw, text, font)
+    return total_w
+
+
+def _draw_pinyin_underline(draw, x_center, y_mid, total_w, font, color=None):
+    """在拼音文字下方画一条下划线（橙色）。用于提示该音节在原句中存在。"""
+    if total_w <= 0:
+        return
+    try:
+        bbox = font.getbbox("Ag")
+        fh = bbox[3] - bbox[1]
+    except Exception:
+        fh = 22
+    if color is None:
+        color = (230, 110, 0)
+    y_line = y_mid + fh // 2 + 4
+    draw.line([x_center - total_w // 2, y_line, x_center + (total_w - total_w // 2), y_line],
+              fill=color, width=3)
 
 
 def _build_layout(engine):
@@ -471,6 +507,9 @@ def render_grid(engine, output_path, title="猜诗句", max_attempts=10):
     draw.text((img_w // 2, 20), title, fill=(30, 30, 30), font=f_title, anchor="mt")
 
     y_start = PAD + HEADER_H
+
+    # 原句音节集合（声母+韵母），用于下划线提示
+    answer_syllable_set = _build_syllable_set(engine.target_parts)
 
     # 预计算每列 x 坐标
     col_x = []
@@ -523,7 +562,10 @@ def render_grid(engine, output_path, title="猜诗句", max_attempts=10):
                     segments.append((final, final_color, f_py))
                 if tone:
                     segments.append((tone, tone_color, f_py, 8))
-                _draw_pinyin_joined(draw, x + CELL_W // 2, py_mid, segments)
+                total_w = _draw_pinyin_joined(draw, x + CELL_W // 2, py_mid, segments)
+                # 音节(声母+韵母)在原句中出现过，且整字未完全正确 → 拼音下加下划线
+                if _syllable_underlined(gp, cell, answer_syllable_set):
+                    _draw_pinyin_underline(draw, x + CELL_W // 2, py_mid, total_w, f_py)
 
     # 底部
     remaining = max_attempts - len(engine.history)
@@ -848,7 +890,9 @@ def render_battle(engine, output_path):
     return output_path
 
 
-def _draw_battle_row(draw, x0, y, n, cell_w, cell_h, gap, parts, comp, f_char, f_py):
+def _draw_battle_row(draw, x0, y, n, cell_w, cell_h, gap, parts, comp, f_char, f_py, syllable_set=None):
+    if syllable_set is None:
+        syllable_set = set()
     for i in range(n):
         x = x0 + i * (cell_w + gap)
         cell = comp[i] if i < len(comp) else None
@@ -874,7 +918,10 @@ def _draw_battle_row(draw, x0, y, n, cell_w, cell_h, gap, parts, comp, f_char, f
                 segments.append((final, final_color, f_py))
             if tone:
                 segments.append((tone, tone_color, f_py, 6))
-            _draw_pinyin_joined(draw, x + cell_w // 2, py_mid, segments)
+            total_w = _draw_pinyin_joined(draw, x + cell_w // 2, py_mid, segments)
+            # 音节在原句中出现过，且整字未完全正确 → 拼音下加下划线
+            if _syllable_underlined(gp, cell, syllable_set):
+                _draw_pinyin_underline(draw, x + cell_w // 2, py_mid, total_w, f_py)
 
 
 # ============ 诗词对垒（互猜对方诗句）============
@@ -1008,14 +1055,18 @@ def render_duel(engine, output_path):
             draw.rounded_rectangle([x, y0, x + cell_w, y0 + cell_h], radius=8, fill=CELL_BG, outline=BORDER_COLOR, width=2)
 
     # 猜测历史
+    a_syl_set = _build_syllable_set(engine.a_target_parts)  # A 猜 B 的题
+    b_syl_set = _build_syllable_set(engine.b_target_parts)  # B 猜 A 的题
     for row_idx in range(n_rows):
         y = y0 + (row_idx + 1) * (cell_h + gap)
         if row_idx < len(engine.a_history):
             _draw_battle_row(draw, x_left, y, n, cell_w, cell_h, gap,
-                             engine.a_history[row_idx][1], engine.a_history[row_idx][2], f_char, f_py)
+                             engine.a_history[row_idx][1], engine.a_history[row_idx][2], f_char, f_py,
+                             a_syl_set)
         if row_idx < len(engine.b_history):
             _draw_battle_row(draw, x_right, y, n, cell_w, cell_h, gap,
-                             engine.b_history[row_idx][1], engine.b_history[row_idx][2], f_char, f_py)
+                             engine.b_history[row_idx][1], engine.b_history[row_idx][2], f_char, f_py,
+                             b_syl_set)
 
     if engine.winner:
         wname = engine.side_name(engine.winner)
