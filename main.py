@@ -580,55 +580,106 @@ class PoetryPlugin(Star):
             yield event.plain_result("当前群已有进行中的邀战对局，请先结束。")
             return
 
-        target_id = self._extract_at_id(event)
-        if not target_id:
-            yield event.plain_result("请艾特要挑战的成员，如：/诗词对垒 @某人")
-            return
         sender_id = str(event.get_sender_id())
+        sender_name = event.get_sender_name() or f"用户{sender_id}"
+
+        # ===== 解析参数：@某人 / 长度(4-7) / 提示方式(声|形)，可组合任意顺序 =====
+        target_id = self._extract_at_id(event)
+        word_len = None
+        hint_mode = None
+        msg_text = str(event.get_message_str() or "")
+        # 去掉指令前缀和 @ 片段后的剩余文本
+        remainder = re.sub(r"^/诗词对垒", "", msg_text, flags=re.IGNORECASE)
+        remainder = re.sub(r"\[CQ:at,qq=\d+\]", " ", remainder)
+        remainder = re.sub(r"@\d{5,12}", " ", remainder)
+        remainder = re.sub(r"\s+", " ", remainder).strip()
+
+        valid_len = {"4", "5", "6", "7"}
+        for token in remainder.split(" "):
+            if not token:
+                continue
+            if token in valid_len:
+                if word_len is not None:
+                    yield event.plain_result("❌ 只能指定一个长度（4/5/6/7）。\n用法：/诗词对垒 [@某人] [4|5|6|7] [声|形]")
+                    return
+                word_len = int(token)
+            elif token in ("声", "形", "拼音", "部首"):
+                if hint_mode is not None:
+                    yield event.plain_result("❌ 只能指定一种提示方式（声=拼音 / 形=部首）。\n用法：/诗词对垒 [@某人] [4|5|6|7] [声|形]")
+                    return
+                hint_mode = "pinyin" if token in ("声", "拼音") else "radical"
+            else:
+                yield event.plain_result(
+                    f"❌ 无效参数「{token}」。\n用法：/诗词对垒 [@某人] [4|5|6|7] [声|形]\n"
+                    f"例如：/诗词对垒 4 声 ｜ /诗词对垒 形 @某人 ｜ /诗词对垒 5"
+                )
+                return
+
         if target_id == sender_id:
             yield event.plain_result("不能挑战自己哦~")
             return
 
-        target_name = f"用户{target_id}"
-        try:
-            info = await event.bot.api.call_action("get_group_member_info", group_id=int(group_id), user_id=int(target_id))
-            if isinstance(info, dict) and "data" in info:
-                info = info["data"]
-            target_name = info.get("nickname") or info.get("card") or target_name
-        except Exception:
-            pass
+        # 未指定长度 -> 随机：4字10% / 6字10% / 5、7字各40%
+        if word_len is None:
+            import random as _r
+            roll = _r.random()
+            if roll < 0.10:
+                word_len = 4
+            elif roll < 0.20:
+                word_len = 6
+            elif roll < 0.60:
+                word_len = 5
+            else:
+                word_len = 7
 
-        # 随机出题字数：4字15%、6字15%、5/7字平分剩余70%（各35%）
-        import random as _r
-        roll = _r.random()
-        if roll < 0.15:
-            word_len = 4
-        elif roll < 0.30:
-            word_len = 6
-        elif roll < 0.65:
-            word_len = 5
-        else:
-            word_len = 7
+        # 未指定提示方式 -> 随机：声70% / 形30%
+        if hint_mode is None:
+            import random as _r2
+            hint_mode = "pinyin" if _r2.random() < 0.70 else "radical"
+
+        target_name = None
+        if target_id:
+            target_name = f"用户{target_id}"
+            try:
+                info = await event.bot.api.call_action("get_group_member_info", group_id=int(group_id), user_id=int(target_id))
+                if isinstance(info, dict) and "data" in info:
+                    info = info["data"]
+                target_name = info.get("nickname") or info.get("card") or target_name
+            except Exception:
+                pass
 
         self.duel_sessions[session_id] = {
             "state": "wait_confirm",
             "challenger_id": sender_id,
-            "challenger_name": event.get_sender_name() or f"用户{sender_id}",
-            "opponent_id": target_id,
+            "challenger_name": sender_name,
+            "opponent_id": target_id,   # 无@则为 None，由第一个回复【接受】者担任
             "opponent_name": target_name,
             "word_len": word_len,
+            "hint_mode": hint_mode,
             "puzzles": {},        # {user_id: sentence}
             "puzzle_done": set(), # 已出题的人
             "engine": None,
             "group_origin": getattr(event, "unified_msg_origin", None),
             "created_at": time.time(),
         }
-        yield event.plain_result(
-            f"🍵 【诗词对垒】\n"
-            f"{event.get_sender_name()} 向 {target_name} 发起对垒！\n"
-            f"双方各出 {word_len} 字诗句（曲库中，前缀「cc」）作为题目，随后互猜对方诗句，先猜中者获胜。\n"
-            f"请 {target_name} 回复【接受】开始，或回复【拒绝】。（2 分钟内有效）"
-        )
+
+        hint_label = "拼音" if hint_mode == "pinyin" else "部首"
+        if target_id:
+            yield event.plain_result(
+                f"🍵 【诗词对垒】\n"
+                f"{sender_name} 向 {target_name} 发起对垒！\n"
+                f"双方各出 {word_len} 字诗句（曲库中，前缀「cc」）作为题目，随后互猜对方诗句，先猜中者获胜。\n"
+                f"提示方式：{hint_label}\n"
+                f"请 {target_name} 回复【接受】开始，或回复【拒绝】。（2 分钟内有效）"
+            )
+        else:
+            yield event.plain_result(
+                f"🍵 【诗词对垒】\n"
+                f"{sender_name} 发起自由对垒！\n"
+                f"双方各出 {word_len} 字诗句（曲库中，前缀「cc」）作为题目，随后互猜对方诗句，先猜中者获胜。\n"
+                f"提示方式：{hint_label}\n"
+                f"第一个回复【接受】的群成员将作为对手。（2 分钟内有效）"
+            )
         try:
             origin = getattr(event, "unified_msg_origin", None)
             asyncio.create_task(self._duel_confirm_timeout(session_id, origin))
@@ -701,9 +752,16 @@ class PoetryPlugin(Star):
         if not duel:
             return
 
-        # 判断是否对垒参与者
+        # 判断是否对垒参与者。
+        # 自由对垒（opponent_id 为空）在 wait_confirm 阶段：任何群成员回复【接受】都可成为对手，
+        # 因此群聊中所有成员在等待确认期间都可进入处理；其他阶段仅参与者可进入。
+        is_free_confirm = (
+            duel.get("state") == "wait_confirm"
+            and not duel.get("opponent_id")
+            and not is_private
+        )
         is_participant = uid in (duel.get("challenger_id"), duel.get("opponent_id"))
-        if not is_participant:
+        if not is_participant and not is_free_confirm:
             # 非参与者：放行（不吞消息，让正常流程/LLM处理）
             return
 
@@ -722,31 +780,63 @@ class PoetryPlugin(Star):
                 _block_llm()
                 yield event.plain_result("⏰ 对垒挑战超时，已自动取消。")
                 return
-            if uid != duel["opponent_id"]:
-                # 挑战者消息：不吞，避免 /诗词对垒 命令消息产生空响应
-                return
-            if msg_raw in ("接受", "同意", "应战"):
-                duel["state"] = "wait_puzzle"
-                wl = duel["word_len"]
-                hint = f"🍵 【诗词对垒】请发送一句 {wl} 字诗句作为你的题目（总库中，前缀「cc」）。\n例：cc 床前明月光"
-                ok_a = await self._send_private(event.bot, duel["challenger_id"], hint)
-                ok_b = await self._send_private(event.bot, duel["opponent_id"], hint)
-                _block_llm()
-                if ok_a and ok_b:
-                    yield event.plain_result(f"🍵 对垒开始！已私聊双方提示出题（各 {wl} 字），出题完成后在群聊公开互猜。")
-                else:
-                    yield event.plain_result(
-                        f"⚠️ 私聊出题失败（机器人需与双方互为好友才能私聊）。\n"
-                        f"请先让双方添加机器人为好友，再重新发起对垒。"
-                    )
+            opp_id = duel.get("opponent_id")
+            if opp_id:
+                # 指定对手模式：仅对手可接受/拒绝
+                if uid != opp_id:
+                    return
+                if msg_raw in ("接受", "同意", "应战"):
+                    duel["state"] = "wait_puzzle"
+                    wl = duel["word_len"]
+                    hl = "拼音" if duel.get("hint_mode") == "pinyin" else "部首"
+                    hint = (f"🍵 【诗词对垒】提示方式：{hl}\n"
+                            f"请发送一句 {wl} 字诗句作为你的题目（总库中，前缀「cc」）。\n例：cc 床前明月光")
+                    ok_a = await self._send_private(event.bot, duel["challenger_id"], hint)
+                    ok_b = await self._send_private(event.bot, duel["opponent_id"], hint)
+                    _block_llm()
+                    if ok_a and ok_b:
+                        yield event.plain_result(f"🍵 对垒开始！已私聊双方提示出题（各 {wl} 字），出题完成后在群聊公开互猜。")
+                    else:
+                        yield event.plain_result(
+                            f"⚠️ 私聊出题失败（机器人需与双方互为好友才能私聊）。\n"
+                            f"请先让双方添加机器人为好友，再重新发起对垒。"
+                        )
+                        self.duel_sessions.pop(sid)
+                    return
+                elif msg_raw in ("拒绝", "拒绝挑战", "不接受"):
                     self.duel_sessions.pop(sid)
+                    _block_llm()
+                    yield event.plain_result(f"{duel['opponent_name']} 拒绝了挑战。")
+                    return
                 return
-            elif msg_raw in ("拒绝", "拒绝挑战", "不接受"):
-                self.duel_sessions.pop(sid)
-                _block_llm()
-                yield event.plain_result(f"{duel['opponent_name']} 拒绝了挑战。")
+            else:
+                # 自由对垒：第一个回复【接受】的群成员成为对手（挑战者除外）
+                if uid == duel["challenger_id"]:
+                    if msg_raw in ("接受", "同意", "应战"):
+                        _block_llm()
+                        yield event.plain_result("不能挑战自己哦~ 请等待其他成员回复【接受】。")
+                    return
+                if msg_raw in ("接受", "同意", "应战"):
+                    duel["opponent_id"] = uid
+                    duel["opponent_name"] = event.get_sender_name() or f"用户{uid}"
+                    duel["state"] = "wait_puzzle"
+                    wl = duel["word_len"]
+                    hl = "拼音" if duel.get("hint_mode") == "pinyin" else "部首"
+                    hint = (f"🍵 【诗词对垒】提示方式：{hl}\n"
+                            f"请发送一句 {wl} 字诗句作为你的题目（总库中，前缀「cc」）。\n例：cc 床前明月光")
+                    ok_a = await self._send_private(event.bot, duel["challenger_id"], hint)
+                    ok_b = await self._send_private(event.bot, uid, hint)
+                    _block_llm()
+                    if ok_a and ok_b:
+                        yield event.plain_result(f"🍵 {event.get_sender_name()} 接受对垒！已私聊双方提示出题（各 {wl} 字），出题完成后在群聊公开互猜。")
+                    else:
+                        yield event.plain_result(
+                            f"⚠️ 私聊出题失败（机器人需与双方互为好友才能私聊）。\n"
+                            f"请先让双方添加机器人为好友，再重新发起对垒。"
+                        )
+                        self.duel_sessions.pop(sid)
+                    return
                 return
-            return
 
         # ===== 出题阶段（私聊）=====
         if duel["state"] == "wait_puzzle":
@@ -826,7 +916,7 @@ class PoetryPlugin(Star):
                 yield event.plain_result(err)
                 return
             img_path = os.path.join(str(self.plugin_data_dir), f"duel_{sid}.png")
-            render_duel(engine, img_path)
+            render_duel(engine, img_path, hint_mode=duel.get("hint_mode", "pinyin"))
             _block_llm()
             # 先处理状态/胜负，再统一 yield（避免生成器被中断导致不推进）
             if all_correct:

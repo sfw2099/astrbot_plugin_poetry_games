@@ -3,10 +3,122 @@
 import os
 import re
 import random
+import gzip
+import json
 from PIL import Image, ImageDraw, ImageFont
 
 # pypinyin 惰性加载
 _py_available = False
+
+# 214 个 Kangxi 部首：编号 -> 部首字符
+_KANGXI = {
+    1: "一", 2: "丨", 3: "丶", 4: "丿", 5: "乙", 6: "亅", 7: "二", 8: "亠",
+    9: "人", 10: "儿", 11: "入", 12: "八", 13: "冂", 14: "冖", 15: "冫", 16: "几",
+    17: "凵", 18: "刀", 19: "力", 20: "勹", 21: "匕", 22: "匚", 23: "匸", 24: "十",
+    25: "卜", 26: "卩", 27: "厂", 28: "厶", 29: "又", 30: "口", 31: "囗", 32: "土",
+    33: "士", 34: "夂", 35: "夊", 36: "夕", 37: "大", 38: "女", 39: "子", 40: "宀",
+    41: "寸", 42: "小", 43: "尢", 44: "尸", 45: "屮", 46: "山", 47: "巛", 48: "工",
+    49: "己", 50: "巾", 51: "干", 52: "幺", 53: "广", 54: "廴", 55: "廾", 56: "弋",
+    57: "弓", 58: "彐", 59: "彡", 60: "彳", 61: "心", 62: "戈", 63: "戶", 64: "手",
+    65: "支", 66: "攴", 67: "文", 68: "斗", 69: "斤", 70: "方", 71: "无", 72: "日",
+    73: "曰", 74: "月", 75: "木", 76: "欠", 77: "止", 78: "歹", 79: "殳", 80: "毋",
+    81: "比", 82: "毛", 83: "氏", 84: "气", 85: "水", 86: "火", 87: "爪", 88: "父",
+    89: "爻", 90: "爿", 91: "片", 92: "牙", 93: "牛", 94: "犬", 95: "玄", 96: "玉",
+    97: "瓜", 98: "瓦", 99: "甘", 100: "生", 101: "用", 102: "田", 103: "疋", 104: "疒",
+    105: "癶", 106: "白", 107: "皮", 108: "皿", 109: "目", 110: "矛", 111: "矢", 112: "石",
+    113: "示", 114: "禸", 115: "禾", 116: "穴", 117: "立", 118: "竹", 119: "米", 120: "糸",
+    121: "缶", 122: "网", 123: "羊", 124: "羽", 125: "老", 126: "而", 127: "耒", 128: "耳",
+    129: "聿", 130: "肉", 131: "臣", 132: "自", 133: "至", 134: "臼", 135: "舌", 136: "舛",
+    137: "舟", 138: "艮", 139: "色", 140: "艸", 141: "虍", 142: "虫", 143: "血", 144: "行",
+    145: "衣", 146: "襾", 147: "見", 148: "角", 149: "言", 150: "谷", 151: "豆", 152: "豕",
+    153: "豸", 154: "貝", 155: "赤", 156: "走", 157: "足", 158: "身", 159: "車", 160: "辛",
+    161: "辰", 162: "辵", 163: "邑", 164: "酉", 165: "釆", 166: "里", 167: "長", 168: "門",
+    169: "阜", 170: "隶", 171: "隹", 172: "雨", 173: "青", 174: "非", 175: "面", 176: "革",
+    177: "韋", 178: "韭", 179: "音", 180: "頁", 181: "風", 182: "飛", 183: "食", 184: "首",
+    185: "香", 186: "馬", 187: "骨", 188: "高", 189: "髟", 190: "鬥", 191: "鬯", 192: "鬲",
+    193: "鬼", 194: "魚", 195: "鳥", 196: "鹵", 197: "鹿", 198: "麥", 199: "麻", 200: "黃",
+    201: "黍", 202: "黑", 203: "黹", 204: "黽", 205: "鼎", 206: "鼓", 207: "鼠", 208: "鼻",
+    209: "齊", 210: "齒", 211: "龍", 212: "龜", 213: "龠", 214: "龠",
+}
+
+# 部首映射（懒加载）：{字符: 部首字符}
+_RADICAL_MAP = None
+_RADICAL_MAP_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "radical_map.json.gz")
+
+
+def _load_radical_map():
+    """惰性加载部首映射（gzip 压缩 JSON）。返回 {char: 部首字符}。"""
+    global _RADICAL_MAP
+    if _RADICAL_MAP is not None:
+        return _RADICAL_MAP
+    m = {}
+    try:
+        if os.path.exists(_RADICAL_MAP_PATH):
+            with gzip.open(_RADICAL_MAP_PATH, "rt", encoding="utf-8") as f:
+                m = json.load(f)
+    except Exception:
+        m = {}
+    _RADICAL_MAP = m
+    return m
+
+
+def radical_of(char):
+    """返回单字的主部首字符（Unihan Kangxi 部首）。未命中返回空串。"""
+    if not char:
+        return ""
+    m = _load_radical_map()
+    return m.get(char, "")
+
+
+def radical_status(guess_chars, answer_chars):
+    """按宽松存在性规则计算每格的 (char_status, radical_status)。
+
+    char_status: correct(对位) / present(错位存在) / absent(不存在)
+    radical_status: correct(部首对位) / present(部首错位存在) / absent(部首不存在)
+    """
+    n = len(answer_chars)
+    ans_rad = [radical_of(c) for c in answer_chars]
+    rad_count = {}
+    for r in ans_rad:
+        if r:
+            rad_count[r] = rad_count.get(r, 0) + 1
+
+    char_status = ["absent"] * n
+    used_ch = {}
+    ch_count = {}
+    for c in answer_chars:
+        ch_count[c] = ch_count.get(c, 0) + 1
+    # 字 pass1 对位
+    for i in range(n):
+        if i >= len(guess_chars):
+            break
+        g = guess_chars[i]
+        if g == answer_chars[i] and used_ch.get(g, 0) < ch_count.get(g, 0):
+            char_status[i] = "correct"
+            used_ch[g] = used_ch.get(g, 0) + 1
+    # 字 pass2 错位存在
+    for i in range(n):
+        if char_status[i] != "absent":
+            continue
+        g = guess_chars[i] if i < len(guess_chars) else None
+        if g and ch_count.get(g, 0) > used_ch.get(g, 0):
+            char_status[i] = "present"
+            used_ch[g] = used_ch.get(g, 0) + 1
+
+    # 部首 pass1 对位
+    rad_status = ["absent"] * n
+    for i in range(n):
+        g = radical_of(guess_chars[i]) if i < len(guess_chars) else ""
+        if g and g == ans_rad[i]:
+            rad_status[i] = "correct"
+    # 部首 pass2 存在性（宽松：答案中出现过即 present）
+    for i in range(n):
+        if rad_status[i] != "absent":
+            continue
+        g = radical_of(guess_chars[i]) if i < len(guess_chars) else ""
+        if g and rad_count.get(g, 0) > 0:
+            rad_status[i] = "present"
+    return char_status, rad_status
 
 
 def _init_pypinyin():
@@ -1010,8 +1122,13 @@ class DuelVerseEngine:
         return self.a_history if side == "a" else self.b_history
 
 
-def render_duel(engine, output_path):
-    """渲染诗词对垒棋盘：左=A猜B的题，右=B猜A的题。"""
+def render_duel(engine, output_path, hint_mode="pinyin"):
+    """渲染诗词对垒棋盘：左=A猜B的题，右=B猜A的题。
+
+    hint_mode: "pinyin" 拼音提示（默认） / "radical" 部首提示。
+    """
+    if hint_mode == "radical":
+        return render_duel_radical(engine, output_path)
     n = len(engine.a_target_parts)
     pad = 30
     header_h = 70
@@ -1077,3 +1194,93 @@ def render_duel(engine, output_path):
 
     img.save(output_path, "PNG")
     return output_path
+
+
+def render_duel_radical(engine, output_path):
+    """渲染诗词对垒棋盘（部首提示模式）。
+
+    每个汉字格只显示放大的字（无拼音、无部首字符），颜色信号：
+    - 字：对位绿 / 错位存在橙 / 不存在灰
+    - 边框：部首对位绿（字对位时） / 部首错位存在橙 / 部首不存在灰
+    """
+    n = len(engine.a_target_parts)
+    pad = 30
+    header_h = 70
+    sub_h = 50
+    cell_h = 150
+    gap = 8
+    cell_w = 120
+    mid_gap = 40
+
+    rows_a = max(1, len(engine.a_history))
+    rows_b = max(1, len(engine.b_history))
+    n_rows = max(rows_a, rows_b)
+
+    side_w = n * cell_w + (n - 1) * gap
+    img_w = pad * 2 + side_w * 2 + mid_gap
+    img_h = pad + header_h + sub_h + (n_rows + 1) * (cell_h + gap) + 70
+
+    img = Image.new("RGB", (img_w, img_h), (250, 250, 252))
+    draw = ImageDraw.Draw(img)
+
+    f_title = _get_font(28)
+    f_sub = _get_font(20)
+    f_char = _get_font(64)
+    f_hint = _get_font(14)
+
+    draw.text((img_w // 2, 18), "诗词对垒 · 部首提示", fill=(30, 30, 30), font=f_title, anchor="mt")
+
+    x_left = pad
+    x_right = pad + side_w + mid_gap
+
+    draw.text((x_left + side_w // 2, pad + header_h - 20), f"{engine.a_name} 猜 {engine.b_name} 的题", fill=(40, 40, 40), font=f_sub, anchor="mm")
+    draw.text((x_right + side_w // 2, pad + header_h - 20), f"{engine.b_name} 猜 {engine.a_name} 的题", fill=(40, 40, 40), font=f_sub, anchor="mm")
+
+    y0 = pad + header_h + sub_h
+
+    # 首行空白框
+    for x0 in (x_left, x_right):
+        for i in range(n):
+            x = x0 + i * (cell_w + gap)
+            draw.rounded_rectangle([x, y0, x + cell_w, y0 + cell_h], radius=8, fill=CELL_BG, outline=BORDER_COLOR, width=2)
+
+    # 猜测历史（部首模式）
+    for row_idx in range(n_rows):
+        y = y0 + (row_idx + 1) * (cell_h + gap)
+        if row_idx < len(engine.a_history):
+            _draw_radical_row(draw, x_left, y, n, cell_w, cell_h, gap,
+                              engine.a_history[row_idx][0], engine.a_target_parts, f_char)
+        if row_idx < len(engine.b_history):
+            _draw_radical_row(draw, x_right, y, n, cell_w, cell_h, gap,
+                              engine.b_history[row_idx][0], engine.b_target_parts, f_char)
+
+    if engine.winner:
+        wname = engine.side_name(engine.winner)
+        footer = f"🏆 {wname} 猜中了对方的诗句！"
+    else:
+        footer = f"轮到：{engine.current_name()}"
+    draw.text((img_w // 2, img_h - 20), footer, fill=(120, 120, 120), font=f_hint, anchor="mb")
+
+    img.save(output_path, "PNG")
+    return output_path
+
+
+def _draw_radical_row(draw, x0, y, n, cell_w, cell_h, gap, guess_text, target_parts, f_char):
+    """渲染一行部首模式的猜测：每格放大汉字 + 颜色信号边框。"""
+    guess_chars = list(extract_hanzi(guess_text))
+    answer_chars = [p["char"] for p in target_parts]
+    char_status, rad_status = radical_status(guess_chars, answer_chars)
+    for i in range(n):
+        x = x0 + i * (cell_w + gap)
+        # 边框颜色：部首错位存在 -> 橙；部首不存在 -> 灰；部首对位 -> 绿（字对位时）
+        if rad_status[i] == "present":
+            border = (230, 110, 0)
+        elif rad_status[i] == "absent":
+            border = (160, 160, 160)
+        else:  # correct
+            border = (0, 150, 40) if char_status[i] == "correct" else (230, 110, 0)
+        draw.rounded_rectangle([x, y, x + cell_w, y + cell_h], radius=8, fill=CELL_BG, outline=border, width=5)
+        ch = guess_chars[i] if i < len(guess_chars) else ""
+        if ch:
+            cc = {"correct": (0, 150, 40), "present": (230, 110, 0), "absent": (160, 160, 160)}[char_status[i]]
+            draw.text((x + cell_w // 2, y + cell_h // 2), ch, fill=cc, font=f_char, anchor="mm")
