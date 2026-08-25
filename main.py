@@ -588,8 +588,8 @@ class PoetryPlugin(Star):
         word_len = None
         hint_mode = None
         msg_text = str(event.get_message_str() or "")
-        # 去掉指令前缀和 @ 片段后的剩余文本
-        remainder = re.sub(r"^/诗词对垒", "", msg_text, flags=re.IGNORECASE)
+        # 去掉指令前缀（可能带/或不带/）和 @ 片段后的剩余文本
+        remainder = re.sub(r"^[/／]?\s*诗词对垒", "", msg_text, flags=re.IGNORECASE)
         remainder = re.sub(r"\[CQ:at,qq=\d+\]", " ", remainder)
         remainder = re.sub(r"@\d{5,12}", " ", remainder)
         remainder = re.sub(r"\s+", " ", remainder).strip()
