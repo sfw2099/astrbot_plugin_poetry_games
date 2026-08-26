@@ -456,6 +456,9 @@ class GuessVerseEngine:
         return False
 
     def is_finished(self):
+        # max_attempts 为 None 表示不限次数，永不因次数耗尽结束
+        if self.max_attempts is None:
+            return False
         return len(self.history) >= self.max_attempts
 
 
@@ -680,8 +683,11 @@ def render_grid(engine, output_path, title="猜诗句", max_attempts=10):
                     _draw_pinyin_underline(draw, x + CELL_W // 2, py_mid, total_w, f_py)
 
     # 底部
-    remaining = max_attempts - len(engine.history)
-    footer = f"剩余机会: {remaining} / {max_attempts}    答案 {len(engine.target_hanzi)} 字（含标点）"
+    if max_attempts is None:
+        footer = f"不限次数    已猜 {len(engine.history)} 次    答案 {len(engine.target_hanzi)} 字（含标点）"
+    else:
+        remaining = max_attempts - len(engine.history)
+        footer = f"剩余机会: {remaining} / {max_attempts}    答案 {len(engine.target_hanzi)} 字（含标点）"
     draw.text((img_w // 2, img_h - 20), footer, fill=(120, 120, 120), font=f_hint, anchor="mb")
 
     img.save(output_path, "PNG")

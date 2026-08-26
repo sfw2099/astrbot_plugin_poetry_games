@@ -228,7 +228,7 @@ cc XXXX           → 私聊出题 / 群聊猜测（都带此前缀）
 | `flowing_timeout` | int | 60 | 衔字飞花令每回限时（秒） |
 | `crossword_timeout` | int | 90 | 纵横飞花令每回限时（秒） |
 | `snake_timeout` | int | 120 | 蛇形飞花令每回限时（秒） |
-| `verse_max_attempts` | int | 10 | 猜诗句每局最大猜测次数 |
+| `verse_max_attempts` | int | 10 | ~~猜诗句每局最大猜测次数~~（v3.11.2 起猜诗句不限次数，该配置不再生效） |
 | `verse_min_len` | int | 5 | 猜诗句答案最短字数 |
 | `verse_max_len` | int | 10 | 猜诗句答案最长字数 |
 | `proxy_urls` | text | (内置列表) | 数据库下载地址，一行一个 |

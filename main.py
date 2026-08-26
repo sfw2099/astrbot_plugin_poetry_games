@@ -394,7 +394,7 @@ class PoetryPlugin(Star):
             yield event.plain_result("游戏进行中！发送诗句进行猜测，或发送【结束猜诗句】退出。")
             return
 
-        engine = GuessVerseEngine(self.db, self.verse_max_attempts, self.verse_min_len, self.verse_max_len, classic_poems=self.classic_poems)
+        engine = GuessVerseEngine(self.db, None, self.verse_min_len, self.verse_max_len, classic_poems=self.classic_poems)
         ok, msg = engine.new_game()
         if not ok:
             yield event.plain_result(f"❌ 初始化失败：{msg}")
@@ -403,7 +403,7 @@ class PoetryPlugin(Star):
         self.guess_verse_sessions[session_id] = engine
         yield event.plain_result(
             "🎯 【猜诗句】开始！\n"
-            f"答案是一句 {len(engine.target_hanzi)} 字的完整诗句，你有 {self.verse_max_attempts} 次机会。\n"
+            f"答案是一句 {len(engine.target_hanzi)} 字的完整诗句，不限猜测次数。\n"
             "发送对应字数的完整句进行猜测，如：床前明月光，疑是地上霜。\n"
             "每次猜测后，每个字的【汉字/声母/韵母/声调】四个属性独立显示颜色：\n"
             "🟢 绿色 = 正确且位置正确\n"
@@ -1313,7 +1313,7 @@ class PoetryPlugin(Star):
                 # 不合规的猜测静默忽略，不回复，不占次数
                 return
             img_path = os.path.join(str(self.plugin_data_dir), f"verse_{session_id}.png")
-            render_grid(engine, img_path, max_attempts=self.verse_max_attempts)
+            render_grid(engine, img_path, max_attempts=None)
             yield event.image_result(img_path)
 
             if all_correct:
@@ -1331,8 +1331,7 @@ class PoetryPlugin(Star):
                 del self.guess_verse_sessions[session_id]
                 if os.path.exists(img_path): os.remove(img_path)
             else:
-                remaining = self.verse_max_attempts - len(engine.history)
-                yield event.plain_result(f"继续猜！剩余 {remaining} 次机会")
+                yield event.plain_result(f"继续猜！已猜 {len(engine.history)} 次（不限次数）")
             return
 
         if session_id not in self.active_games: return
