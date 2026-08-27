@@ -295,13 +295,14 @@ def _syllable_underlined(gp, cell, syllable_set):
 
 
 class GuessVerseEngine:
-    """猜诗句游戏引擎（单机，无存档）—— 完整句含标点"""
+    """猜诗句游戏引擎（单机，无存档）—— 4-7 字单句，可从总库随机出题"""
 
-    def __init__(self, db_source, max_attempts=10, min_len=7, max_len=18, classic_poems=None):
+    def __init__(self, db_source, max_attempts=10, min_len=7, max_len=18, classic_poems=None, hint_mode="pinyin"):
         self.db_source = db_source
         self.max_attempts = max_attempts
         self.min_len = min_len
         self.max_len = max_len
+        self.hint_mode = hint_mode
         self.target_text = None       # 完整句（含标点）
         self.target_hanzi = None      # 仅汉字
         self.target_parts = None      # 汉字分解列表
@@ -315,6 +316,10 @@ class GuessVerseEngine:
         self._classic_sentences = self._build_classic_index()
         # 曲库完整句的「纯汉字」集合（合规校验用，忽略标点）
         self._classic_hanzi_set = {p.get("hanzi", "") for p in self.classic_poems if p.get("hanzi")}
+        # 曲库中出现的所有单字集合（作为「常见字」参考，用于总库抽题的候选过滤）
+        self._common_chars = set()
+        for p in self.classic_poems:
+            self._common_chars.update(extract_hanzi(p.get("sentence", "") or ""))
         # 声母/韵母状态记录（用于提示功能，静默累积）
         self.initial_status = {}  # 声母 -> correct/present/absent
         self.final_status = {}    # 韵母 -> correct/present/absent
@@ -379,15 +384,45 @@ class GuessVerseEngine:
         sent = random.choice(groups[chosen_cat])
         return sent, self._classic_sentences[sent]
 
-    def new_game(self):
-        """从经典曲库随机抽取一句完整句（含标点）作为答案。返回 (ok, msg)。"""
+    def new_game(self, word_len=None):
+        """随机抽取一句作为答案。返回 (ok, msg)。
+        出题策略：优先经典曲库按字数抽常见句（曲库句子均在校验库中），其次总库随机（优先常见字候选）。
+        """
+        # 优先：经典曲库按字数过滤（曲库句子为常见句）
+        if word_len and self._classic_sentences:
+            cands = []
+            for sent, poem in self._classic_sentences.items():
+                if len(extract_hanzi(sent)) == word_len:
+                    cands.append((sent, poem))
+            if cands:
+                sent, poem = random.choice(cands)
+                self._set_target(sent, poem)
+                return True, sent
+
+        # 其次：总库随机抽指定字数的单句，优先「全常见字」候选
+        if word_len and self.db_source:
+            db_path = self.db_source if isinstance(self.db_source, str) else getattr(self.db_source, "db_path", None)
+            if db_path and os.path.exists(db_path):
+                try:
+                    candidates = self.db_source.get_random_verse(word_len, word_len, target_count=40)
+                    candidates = [c for c in candidates if len(extract_hanzi(c[0])) == word_len]
+                    if candidates:
+                        common = [c for c in candidates if set(extract_hanzi(c[0])) <= (self._common_chars or set())]
+                        pick = random.choice(common) if common else random.choice(candidates)
+                        verse, title, author, dynasty = pick
+                        self._set_target(verse, {"title": title, "author": author, "dynasty": dynasty})
+                        return True, verse
+                except Exception:
+                    pass
+
+        # 回退：经典曲库（任意字数）
         classic = self._random_classic_verse()
         if classic:
             sent, poem = classic
             self._set_target(sent, poem)
             return True, sent
 
-        # 回退：全库随机抽取（无标点，仅汉字，尽量不触发）
+        # 最后回退：全库随机抽取
         if not self.db_source:
             return False, "数据库不可用"
         db_path = self.db_source if isinstance(self.db_source, str) else getattr(self.db_source, "db_path", None)
@@ -415,19 +450,17 @@ class GuessVerseEngine:
 
     def guess(self, text):
         """处理一次猜测。返回 (ok, msg, compare_result, all_correct)。
-        输入为含标点的完整句。只按汉字数与答案匹配（标点不限制），汉字做 Wordle 比较。"""
+        输入为纯汉字（cc 前缀与库校验由上层负责）。只按汉字数与答案匹配，汉字做 Wordle 比较。"""
         text = text.strip()
         clean_hanzi = extract_hanzi(text)
         if not clean_hanzi:
-            return False, "请输入汉字诗句（含标点）", None, False
+            return False, "请输入汉字诗句", None, False
         if len(clean_hanzi) > self.max_len:
-            return False, f"诗句最长 {self.max_len} 字（不含标点），当前 {len(clean_hanzi)} 字", None, False
+            return False, f"诗句最长 {self.max_len} 字，当前 {len(clean_hanzi)} 字", None, False
         if len(clean_hanzi) < self.min_len:
-            return False, f"诗句最短 {self.min_len} 字（不含标点），当前 {len(clean_hanzi)} 字", None, False
-
-        # 合规校验：输入句须在曲库或总库中（按汉字匹配，忽略标点）
-        if not self._is_valid_poem_line(text, clean_hanzi):
-            return False, f"「{text}」不是一句完整的古诗，请发送合规诗句", None, False
+            return False, f"诗句最短 {self.min_len} 字，当前 {len(clean_hanzi)} 字", None, False
+        if len(clean_hanzi) != len(self.target_hanzi):
+            return False, f"答案 {len(self.target_hanzi)} 个字，当前 {len(clean_hanzi)} 字", None, False
 
         guess_parts = decompose_text(clean_hanzi)
         comp = compare_guess(guess_parts, self.target_parts)
@@ -439,21 +472,6 @@ class GuessVerseEngine:
             for c in comp
         )
         return True, "", comp, all_correct
-
-    def _is_valid_poem_line(self, text, clean_hanzi):
-        """校验是否为曲库或总库中的完整句（按汉字匹配，忽略标点）。"""
-        # 曲库按汉字匹配
-        if clean_hanzi in self._classic_hanzi_set:
-            return True
-        # 回退：总库按汉字匹配
-        db = self.db_source
-        if hasattr(db, "is_complete_sentence"):
-            try:
-                if db.is_complete_sentence(clean_hanzi):
-                    return True
-            except Exception:
-                pass
-        return False
 
     def is_finished(self):
         # max_attempts 为 None 表示不限次数，永不因次数耗尽结束
@@ -599,8 +617,10 @@ def _build_layout(engine):
 PUNCT_W = 40  # 标点列宽度
 
 
-def render_grid(engine, output_path, title="猜诗句", max_attempts=10):
-    """渲染游戏网格。列 = 汉字列 + 标点列。"""
+def render_grid(engine, output_path, title="猜诗句", max_attempts=10, hint_mode="pinyin"):
+    """渲染游戏网格。列 = 汉字列 + 标点列。
+    hint_mode: "pinyin" 拼音提示（默认） / "radical" 部首提示（放大汉字+边框信号）。
+    """
     layout = _build_layout(engine)
     n_cols = len(layout)
     n_rows = max(1, len(engine.history))
@@ -615,15 +635,17 @@ def render_grid(engine, output_path, title="猜诗句", max_attempts=10):
 
     f_title = _get_font(30)
     f_char = _get_font(54)
+    f_rad_char = _get_font(64)
     f_py = _get_font(30)
     f_hint = _get_font(15)
     f_punct = _get_font(36)
 
-    draw.text((img_w // 2, 20), title, fill=(30, 30, 30), font=f_title, anchor="mt")
+    title_label = "猜诗句 · 部首提示" if hint_mode == "radical" else title
+    draw.text((img_w // 2, 20), title_label, fill=(30, 30, 30), font=f_title, anchor="mt")
 
     y_start = PAD + HEADER_H
 
-    # 原句音节集合（声母+韵母），用于下划线提示
+    # 原句音节集合（声母+韵母），用于下划线提示（仅拼音模式）
     answer_syllable_set = _build_syllable_set(engine.target_parts)
 
     # 预计算每列 x 坐标
@@ -636,6 +658,10 @@ def render_grid(engine, output_path, title="猜诗句", max_attempts=10):
     for row_idx, (guess_word, guess_parts, comp_result) in enumerate(engine.history):
         y = y_start + row_idx * (CELL_H + GAP)
         hanzi_pos = 0
+        # 部首模式：预先计算该行各格部首状态
+        guess_chars = [p["char"] for p in guess_parts]
+        answer_chars = [p["char"] for p in engine.target_parts]
+        rad_cs, rad_rs = radical_status(guess_chars, answer_chars) if hint_mode == "radical" else (None, None)
         for col_idx, (ltype, lval) in enumerate(layout):
             x = col_x[col_idx]
             if ltype == "punct":
@@ -651,6 +677,22 @@ def render_grid(engine, output_path, title="猜诗句", max_attempts=10):
 
             if cell is None:
                 draw.rounded_rectangle([x, y, x + CELL_W, y + CELL_H], radius=10, fill=CELL_BG, outline=BORDER_COLOR, width=2)
+                continue
+
+            if hint_mode == "radical":
+                # 部首模式：放大汉字 + 边框信号
+                cs = rad_cs[hanzi_pos - 1] if rad_cs else "absent"
+                rs = rad_rs[hanzi_pos - 1] if rad_rs else "absent"
+                if rs == "present":
+                    border = (230, 110, 0)
+                elif rs == "absent":
+                    border = (160, 160, 160)
+                else:  # correct
+                    border = (0, 150, 40) if cs == "correct" else (230, 110, 0)
+                draw.rounded_rectangle([x, y, x + CELL_W, y + CELL_H], radius=10, fill=CELL_BG, outline=border, width=5)
+                ch = gp["char"] if gp else ""
+                cc = {"correct": (0, 150, 40), "present": (230, 110, 0), "absent": (160, 160, 160)}[cs]
+                draw.text((x + CELL_W // 2, y + CELL_H // 2), ch, fill=cc, font=f_rad_char, anchor="mm")
                 continue
 
             draw.rounded_rectangle([x, y, x + CELL_W, y + CELL_H], radius=10, fill=CELL_BG, outline=BORDER_COLOR, width=2)
@@ -684,10 +726,10 @@ def render_grid(engine, output_path, title="猜诗句", max_attempts=10):
 
     # 底部
     if max_attempts is None:
-        footer = f"不限次数    已猜 {len(engine.history)} 次    答案 {len(engine.target_hanzi)} 字（含标点）"
+        footer = f"不限次数    已猜 {len(engine.history)} 次    答案 {len(engine.target_hanzi)} 字"
     else:
         remaining = max_attempts - len(engine.history)
-        footer = f"剩余机会: {remaining} / {max_attempts}    答案 {len(engine.target_hanzi)} 字（含标点）"
+        footer = f"剩余机会: {remaining} / {max_attempts}    答案 {len(engine.target_hanzi)} 字"
     draw.text((img_w // 2, img_h - 20), footer, fill=(120, 120, 120), font=f_hint, anchor="mb")
 
     img.save(output_path, "PNG")

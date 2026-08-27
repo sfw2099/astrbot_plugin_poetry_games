@@ -113,8 +113,9 @@ class PoetryDB:
             tried = 0
             while len(candidates) < target_count and tried < max_scan:
                 tried += 1
-                offset = random.randint(0, total - 1)
-                cursor.execute("SELECT title, author, dynasty, content FROM poems LIMIT 1 OFFSET ?", (offset,))
+                r = random.randint(1, total)
+                # rowid >= 随机值取下一行：避免 OFFSET 大表全扫，接近 O(1)
+                cursor.execute("SELECT title, author, dynasty, content FROM poems WHERE rowid >= ? LIMIT 1", (r,))
                 row = cursor.fetchone()
                 if not row:
                     continue

@@ -394,22 +394,69 @@ class PoetryPlugin(Star):
             yield event.plain_result("游戏进行中！发送诗句进行猜测，或发送【结束猜诗句】退出。")
             return
 
-        engine = GuessVerseEngine(self.db, None, self.verse_min_len, self.verse_max_len, classic_poems=self.classic_poems)
-        ok, msg = engine.new_game()
+        # ===== 解析参数：长度(4-7) / 提示方式(声|形)，可组合任意顺序 =====
+        word_len = None
+        hint_mode = None
+        msg_text = str(event.get_message_str() or "")
+        remainder = re.sub(r"^[/／]?\s*猜诗句", "", msg_text, flags=re.IGNORECASE)
+        remainder = re.sub(r"\s+", " ", remainder).strip()
+        valid_len = {"4", "5", "6", "7"}
+        for token in remainder.split(" "):
+            if not token:
+                continue
+            if token in valid_len:
+                if word_len is not None:
+                    yield event.plain_result("❌ 只能指定一个长度（4/5/6/7）。\n用法：/猜诗句 [4|5|6|7] [声|形]")
+                    return
+                word_len = int(token)
+            elif token in ("声", "形", "拼音", "部首"):
+                if hint_mode is not None:
+                    yield event.plain_result("❌ 只能指定一种提示方式（声=拼音 / 形=部首）。\n用法：/猜诗句 [4|5|6|7] [声|形]")
+                    return
+                hint_mode = "pinyin" if token in ("声", "拼音") else "radical"
+            else:
+                yield event.plain_result(
+                    f"❌ 无效参数「{token}」。\n用法：/猜诗句 [4|5|6|7] [声|形]\n"
+                    f"例如：/猜诗句 4 声 ｜ /猜诗句 形 ｜ /猜诗句 5"
+                )
+                return
+
+        # 未指定长度 -> 随机：4字10% / 6字10% / 5、7字各40%
+        if word_len is None:
+            import random as _r
+            roll = _r.random()
+            if roll < 0.10:
+                word_len = 4
+            elif roll < 0.20:
+                word_len = 6
+            elif roll < 0.60:
+                word_len = 5
+            else:
+                word_len = 7
+
+        # 未指定提示方式 -> 随机：声70% / 形30%
+        if hint_mode is None:
+            import random as _r2
+            hint_mode = "pinyin" if _r2.random() < 0.70 else "radical"
+
+        engine = GuessVerseEngine(self.db, None, 4, 7,
+                                  classic_poems=self.classic_poems, hint_mode=hint_mode)
+        ok, msg = engine.new_game(word_len=word_len)
         if not ok:
             yield event.plain_result(f"❌ 初始化失败：{msg}")
             return
 
         self.guess_verse_sessions[session_id] = engine
+        hint_label = "拼音" if hint_mode == "pinyin" else "部首"
         yield event.plain_result(
             "🎯 【猜诗句】开始！\n"
-            f"答案是一句 {len(engine.target_hanzi)} 字的完整诗句，不限猜测次数。\n"
-            "发送对应字数的完整句进行猜测，如：床前明月光，疑是地上霜。\n"
-            "每次猜测后，每个字的【汉字/声母/韵母/声调】四个属性独立显示颜色：\n"
+            f"答案是一句 {len(engine.target_hanzi)} 字的单句，提示方式：{hint_label}。\n"
+            "发送「cc 诗句」进行猜测，如：cc 床前明月光\n"
+            "每次猜测后，每个字的【汉字/声母/韵母/声调】独立着色（拼音模式）：\n"
             "🟢 绿色 = 正确且位置正确\n"
             "🟠 橙色 = 答案中存在但位置错误\n"
             "⚪ 灰色 = 答案中不存在\n"
-            "标点符号不限，只要汉字字数一致即可。"
+            "部首模式下用字色+边框颜色提示。"
         )
         # 发送空白框占位图
         blank_path = os.path.join(str(self.plugin_data_dir), f"verse_blank_{session_id}.png")
@@ -433,12 +480,13 @@ class PoetryPlugin(Star):
         msg = (
             "🎯 【猜诗句】规则说明\n"
             "--------------------\n"
-            "1. 系统随机选择一句 7-18 字的完整诗句作为答案。\n"
-            "2. 发送与答案汉字字数一致的完整句（标点不限）进行猜测。\n"
-            "3. 每次猜测后，每个字的【汉字/声母/韵母/声调】独立着色。\n"
-            "4. 显示网格为答案字数，标点只作参考。\n"
-            "5. 四个属性全绿即猜中！\n"
-            "指令：/猜诗句 开始 | /结束猜诗句 退出"
+            "1. 系统从总库随机选择一句 4-7 字的单句作为答案。\n"
+            "2. 发送「cc 诗句」进行猜测（cc 后跟与答案字数一致的诗句）。\n"
+            "3. 每次猜测后，每个字的【汉字/声母/韵母/声调】独立着色（拼音模式）。\n"
+            "4. 部首模式：字色 + 边框颜色提示。\n"
+            "5. 全部绿色即猜中！\n"
+            "指令：/猜诗句 [4|5|6|7] [声|形] 开始 ｜ /结束猜诗句 退出\n"
+            "例：/猜诗句 4 声 ｜ /猜诗句 形 ｜ /猜诗句 5"
         )
         yield event.plain_result(msg)
 
@@ -1302,18 +1350,33 @@ class PoetryPlugin(Star):
         # 🎯 猜诗句游戏处理
         if session_id in self.guess_verse_sessions:
             engine = self.guess_verse_sessions[session_id]
-            # 提示指令：显示声母韵母状态
+            # 提示指令：显示声母韵母状态（仅拼音模式）
             if msg_raw in ("提示", "声韵提示", "拼音提示"):
+                if engine.hint_mode != "pinyin":
+                    yield event.plain_result("当前为部首提示模式，无拼音提示。")
+                    return
                 hint_path = os.path.join(str(self.plugin_data_dir), f"verse_hint_{session_id}.png")
                 render_hint(engine, hint_path)
                 yield event.image_result(hint_path)
                 return
-            ok, err, comp, all_correct = engine.guess(msg_raw)
+            # 猜测需 cc 前缀
+            if not msg_raw.startswith("cc"):
+                return
+            clean = re.sub(r'^cc\s*', '', msg_raw).strip()
+            hanzi = re.sub(r'[^\u4e00-\u9fff]', '', clean)
+            if not hanzi or len(hanzi) != len(engine.target_hanzi):
+                yield event.plain_result(f"答案 {len(engine.target_hanzi)} 个字，当前 {len(hanzi)} 字。请输入「cc 诗句」。")
+                return
+            # 判在不在总库中
+            if not self._is_in_library(clean):
+                yield event.plain_result(f"「{clean}」不在诗词库中，请输入曲库诗句。")
+                return
+            ok, err, comp, all_correct = engine.guess(hanzi)
             if not ok:
                 # 不合规的猜测静默忽略，不回复，不占次数
                 return
             img_path = os.path.join(str(self.plugin_data_dir), f"verse_{session_id}.png")
-            render_grid(engine, img_path, max_attempts=None)
+            render_grid(engine, img_path, max_attempts=None, hint_mode=engine.hint_mode)
             yield event.image_result(img_path)
 
             if all_correct:
