@@ -128,3 +128,73 @@ class PoetryDB:
                         if len(candidates) >= target_count:
                             break
         return candidates
+
+    def _split_clauses(self, content):
+        """按标点切分诗句为分句列表，保留每个分句的纯汉字与其后的分隔符。"""
+        # 用正则找分隔符位置
+        clauses = []
+        last = 0
+        for m in re.finditer(r'[，。！？、；：]', content):
+            part = content[last:m.start()]
+            h = re.sub(r'[^\u4e00-\u9fa5]', '', part)
+            if h:
+                clauses.append((h, m.group()))
+            last = m.end()
+        tail = content[last:]
+        h = re.sub(r'[^\u4e00-\u9fa5]', '', tail)
+        if h:
+            clauses.append((h, ""))
+        return clauses
+
+    def get_random_verse_by_combo(self, a_len, b_len, target_count=3, max_scan=800):
+        """随机抽取「相邻 a字+b字 两句」的诗句。
+        返回 [(combined_text, title, author, dynasty)]，combined_text 保留原分隔符（如「离离原上草，一岁一枯荣」）。
+        """
+        import random
+        candidates = []
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM poems")
+            total = cursor.fetchone()[0]
+            if not total:
+                return candidates
+            tried = 0
+            while len(candidates) < target_count and tried < max_scan:
+                tried += 1
+                r = random.randint(1, total)
+                cursor.execute("SELECT title, author, dynasty, content FROM poems WHERE rowid >= ? LIMIT 1", (r,))
+                row = cursor.fetchone()
+                if not row:
+                    continue
+                title, author, dynasty, content = row
+                clauses = self._split_clauses(content)
+                for i in range(len(clauses) - 1):
+                    ha, pa = clauses[i]
+                    hb, pb = clauses[i + 1]
+                    if len(ha) == a_len and len(hb) == b_len:
+                        combined = f"{ha}{pa}{hb}"
+                        candidates.append((combined, title, author, dynasty))
+                        if len(candidates) >= target_count:
+                            break
+        return candidates
+
+    def is_adjacent_pair(self, a_text, b_text):
+        """判断 a_text、b_text 是否为库中某首诗的相邻两个分句。"""
+        ca = re.sub(r'[^\u4e00-\u9fa5]', '', a_text)
+        cb = re.sub(r'[^\u4e00-\u9fa5]', '', b_text)
+        if not ca or not cb:
+            return False
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT content FROM poems WHERE content LIKE ? LIMIT 100", (f'%{ca}%',))
+                for (content,) in cursor.fetchall():
+                    clauses = self._split_clauses(content)
+                    for i in range(len(clauses) - 1):
+                        ha, _ = clauses[i]
+                        hb, _ = clauses[i + 1]
+                        if ha == ca and hb == cb:
+                            return True
+        except Exception:
+            return False
+        return False

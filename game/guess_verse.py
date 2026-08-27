@@ -384,15 +384,31 @@ class GuessVerseEngine:
         sent = random.choice(groups[chosen_cat])
         return sent, self._classic_sentences[sent]
 
-    def new_game(self, word_len=None):
+    def new_game(self, word_len=None, combo=None):
         """随机抽取一句作为答案。返回 (ok, msg)。
-        出题策略：优先经典曲库按字数抽常见句（曲库句子均在校验库中），其次总库随机（优先常见字候选）。
+
+        word_len: 指定单句字数（4-7）
+        combo: (a, b) 指定「相邻 a字+b字 两句」格式（如 (5,5)/(3,4)/(7,7)）
+        无参数时随机单句；combo 优先从总库抽。
         """
+        # 优先：总库抽「两句」格式
+        if combo and self.db_source:
+            db_path = self.db_source if isinstance(self.db_source, str) else getattr(self.db_source, "db_path", None)
+            if db_path and os.path.exists(db_path):
+                try:
+                    cands = self.db_source.get_random_verse_by_combo(combo[0], combo[1], target_count=5)
+                    if cands:
+                        verse, title, author, dynasty = random.choice(cands)
+                        self._set_target(verse, {"title": title, "author": author, "dynasty": dynasty})
+                        return True, verse
+                except Exception:
+                    pass
+
         # 优先：经典曲库按字数过滤（曲库句子为常见句）
         if word_len and self._classic_sentences:
             cands = []
             for sent, poem in self._classic_sentences.items():
-                if len(extract_hanzi(sent)) == word_len:
+                if len(extract_hanzi(sent)) == word_len and not extract_punct(sent):
                     cands.append((sent, poem))
             if cands:
                 sent, poem = random.choice(cands)
@@ -447,6 +463,50 @@ class GuessVerseEngine:
         self.history = []
         self.initial_status = {}
         self.final_status = {}
+
+    def format_desc(self):
+        """返回答案格式描述，如「5字单句」「5字+5字（两句）」。"""
+        punct = self.target_punct
+        if not punct:
+            return f"{len(self.target_hanzi)} 字单句"
+        # 按标点切分得到各分句字数
+        lens = []
+        cur = 0
+        hanzi = self.target_hanzi
+        for pos, p in punct:
+            lens.append(pos - cur)
+            cur = pos
+        lens.append(len(hanzi) - cur)
+        return " + ".join(f"{x} 字" for x in lens) + "（两句）"
+
+    def check_format(self, text):
+        """校验猜测文本的格式是否与答案一致。返回 (ok, msg)。
+        text 为含标点的完整句。单句答案须无标点且字数一致；两句答案须有标点且各分句字数匹配。
+        """
+        hanzi = extract_hanzi(text)
+        punct = extract_punct(text)
+        if not punct and not self.target_punct:
+            # 单句
+            return len(hanzi) == len(self.target_hanzi), None
+        if punct and self.target_punct:
+            # 两句：比较各分句字数
+            g_lens = []
+            cur = 0
+            for pos, p in punct:
+                g_lens.append(pos - cur)
+                cur = pos
+            g_lens.append(len(hanzi) - cur)
+            t_lens = []
+            cur = 0
+            for pos, p in self.target_punct:
+                t_lens.append(pos - cur)
+                cur = pos
+            t_lens.append(len(self.target_hanzi) - cur)
+            if g_lens == t_lens and len(hanzi) == len(self.target_hanzi):
+                return True, None
+            return False, f"格式需为 {'、'.join(str(x) for x in t_lens)} 字分句（如：带标点的一句）"
+        # 格式类别不匹配
+        return False, None
 
     def guess(self, text):
         """处理一次猜测。返回 (ok, msg, compare_result, all_correct)。
@@ -1050,15 +1110,40 @@ def render_battle(engine, output_path):
     return output_path
 
 
-def _draw_battle_row(draw, x0, y, n, cell_w, cell_h, gap, parts, comp, f_char, f_py, syllable_set=None):
+def _build_duel_layout(punct, n):
+    """构建对垒渲染布局：[(type, index_or_punct)]。
+    type='hanzi' 汉字列（index 为汉字序号）；type='punct' 标点列（显示标点）。
+    punct: [(汉字位置, 标点)]，标点插在对应汉字之后。
+    """
+    layout = []
+    punct_map = dict(punct)
+    for i in range(n):
+        layout.append(("hanzi", i))
+        if (i + 1) in punct_map:
+            layout.append(("punct", punct_map[i + 1]))
+    return layout
+
+
+def _draw_battle_row(draw, x0, y, layout, col_w, punct_w, cell_w, cell_h, gap, parts, comp, f_char, f_py, f_punct, syllable_set=None):
     if syllable_set is None:
         syllable_set = set()
-    for i in range(n):
-        x = x0 + i * (cell_w + gap)
+    cx = x0
+    hanzi_pos = 0
+    for col_type, col_val in layout:
+        if col_type == "punct":
+            # 标点列
+            draw.rounded_rectangle([cx, y, cx + punct_w, y + cell_h], radius=6, fill=(245, 245, 248),
+                                   outline=(210, 210, 215), width=1)
+            draw.text((cx + punct_w // 2, y + cell_h // 2), col_val, fill=(90, 90, 95), font=f_punct, anchor="mm")
+            cx += punct_w + gap
+            continue
+        i = col_val
+        x = cx
         cell = comp[i] if i < len(comp) else None
         gp = parts[i] if i < len(parts) else None
         draw.rounded_rectangle([x, y, x + cell_w, y + cell_h], radius=8, fill=CELL_BG, outline=BORDER_COLOR, width=2)
         if not gp:
+            cx += cell_w + gap
             continue
         ch_color = STATUS_COLOR.get(cell.get("char", "default"), STATUS_COLOR["default"]) if cell else STATUS_COLOR["default"]
         draw.text((x + cell_w // 2, y + cell_h // 2 + 16), gp["char"], fill=ch_color, font=f_char, anchor="mm")
@@ -1082,6 +1167,7 @@ def _draw_battle_row(draw, x0, y, n, cell_w, cell_h, gap, parts, comp, f_char, f
             # 音节在原句中出现过，且整字未完全正确 → 拼音下加下划线
             if _syllable_underlined(gp, cell, syllable_set):
                 _draw_pinyin_underline(draw, x + cell_w // 2, py_mid, total_w, f_py)
+        cx += cell_w + gap
 
 
 # ============ 诗词对垒（互猜对方诗句）============
@@ -1108,12 +1194,16 @@ class DuelVerseEngine:
         self.a_name = a_name
         self.b_id = str(b_id)
         self.b_name = b_name
-        # 各自出的题
+        # 各自出的题（可能含标点，如「离离原上草，一岁一枯荣」）
         self.a_puzzle = a_puzzle
         self.b_puzzle = b_puzzle
-        # 各自要猜的目标（对方出的题）
-        self.a_target_parts = decompose_text(b_puzzle)  # A 猜 B 的题
-        self.b_target_parts = decompose_text(a_puzzle)  # B 猜 A 的题
+        # 各自要猜的目标（对方出的题），比较用纯汉字
+        self.a_target_hanzi = extract_hanzi(b_puzzle)
+        self.b_target_hanzi = extract_hanzi(a_puzzle)
+        self.a_target_parts = decompose_text(self.a_target_hanzi)  # A 猜 B 的题
+        self.b_target_parts = decompose_text(self.b_target_hanzi)  # B 猜 A 的题
+        self.a_target_punct = extract_punct(b_puzzle)
+        self.b_target_punct = extract_punct(a_puzzle)
         # 各自猜测历史
         self.a_history = []  # [(text, parts, comp)] A 猜 B 题
         self.b_history = []  # [(text, parts, comp)] B 猜 A 题
@@ -1122,7 +1212,8 @@ class DuelVerseEngine:
         self.round = 0
 
     def guess(self, user_id, text):
-        """处理某位玩家的猜测（猜对方诗句）。返回 (ok, msg, side, comp, all_correct)。"""
+        """处理某位玩家的猜测（猜对方诗句）。返回 (ok, msg, side, comp, all_correct)。
+        text 为含标点的完整句；比较用纯汉字。"""
         uid = str(user_id)
         clean = extract_hanzi(text)
         if not clean:
@@ -1130,10 +1221,17 @@ class DuelVerseEngine:
 
         side = "a" if uid == self.a_id else "b"
         target_parts = self.a_target_parts if side == "a" else self.b_target_parts
-        target_len = len(target_parts)
+        target_hanzi = self.a_target_hanzi if side == "a" else self.b_target_hanzi
+        target_punct = self.a_target_punct if side == "a" else self.b_target_punct
+        target_len = len(target_hanzi)
 
         if len(clean) != target_len:
             return False, f"对方诗句是 {target_len} 个字，当前 {len(clean)} 字", side, None, False
+
+        # 格式校验：两句题目要求猜测也带标点且分句字数匹配
+        ok_fmt, fmt_msg = self.check_format(text, target_hanzi, target_punct)
+        if not ok_fmt:
+            return False, fmt_msg or "诗句格式需与对方一致（两句需带标点）", side, None, False
 
         guess_parts = decompose_text(clean)
         comp = compare_guess(guess_parts, target_parts)
@@ -1146,6 +1244,45 @@ class DuelVerseEngine:
         if all_correct:
             self.winner = side
         return True, "", side, comp, all_correct
+
+    @staticmethod
+    def check_format(text, target_hanzi, target_punct):
+        """校验猜测格式与目标一致。"""
+        hanzi = extract_hanzi(text)
+        punct = extract_punct(text)
+        if not punct and not target_punct:
+            return True, None  # 都是单句
+        if punct and target_punct:
+            g_lens = []
+            cur = 0
+            for pos, p in punct:
+                g_lens.append(pos - cur)
+                cur = pos
+            g_lens.append(len(hanzi) - cur)
+            t_lens = []
+            cur = 0
+            for pos, p in target_punct:
+                t_lens.append(pos - cur)
+                cur = pos
+            t_lens.append(len(target_hanzi) - cur)
+            if g_lens == t_lens:
+                return True, None
+            return False, f"格式需为 {'、'.join(str(x) for x in t_lens)} 字分句（两句需带标点）"
+        return False, "诗句格式需与对方一致（两句需带标点，单句无需）"
+
+    def format_desc(self, side):
+        """返回某侧题目的格式描述。"""
+        punct = self.a_target_punct if side == "a" else self.b_target_punct
+        hanzi = self.a_target_hanzi if side == "a" else self.b_target_hanzi
+        if not punct:
+            return f"{len(hanzi)} 字单句"
+        lens = []
+        cur = 0
+        for pos, p in punct:
+            lens.append(pos - cur)
+            cur = pos
+        lens.append(len(hanzi) - cur)
+        return " + ".join(f"{x} 字" for x in lens) + "（两句）"
 
     def switch_turn(self):
         self.round += 1
@@ -1174,24 +1311,41 @@ def render_duel(engine, output_path, hint_mode="pinyin"):
     """渲染诗词对垒棋盘：左=A猜B的题，右=B猜A的题。
 
     hint_mode: "pinyin" 拼音提示（默认） / "radical" 部首提示。
+    支持单句与两句（含标点分隔列）题目。
     """
     if hint_mode == "radical":
         return render_duel_radical(engine, output_path)
-    n = len(engine.a_target_parts)
+    a_punct = engine.a_target_punct  # A 猜 B 的题（B 出的题）标点
+    b_punct = engine.b_target_punct  # B 猜 A 的题（A 出的题）标点
+    n_a = len(engine.a_target_hanzi)
+    n_b = len(engine.b_target_hanzi)
+    layout_a = _build_duel_layout(a_punct, n_a)
+    layout_b = _build_duel_layout(b_punct, n_b)
+
     pad = 30
     header_h = 70
     sub_h = 50
     cell_h = 150
     gap = 8
     cell_w = 120
+    punct_w = 36
     mid_gap = 40
+
+    def side_w(layout):
+        w = 0
+        for t, _ in layout:
+            w += (cell_w if t == "hanzi" else punct_w) + gap
+        return w
+
+    sw_a = side_w(layout_a)
+    sw_b = side_w(layout_b)
+    side_w_max = max(sw_a, sw_b)
 
     rows_a = max(1, len(engine.a_history))
     rows_b = max(1, len(engine.b_history))
     n_rows = max(rows_a, rows_b)
 
-    side_w = n * cell_w + (n - 1) * gap
-    img_w = pad * 2 + side_w * 2 + mid_gap
+    img_w = pad * 2 + side_w_max * 2 + mid_gap
     img_h = pad + header_h + sub_h + (n_rows + 1) * (cell_h + gap) + 70
 
     img = Image.new("RGB", (img_w, img_h), (250, 250, 252))
@@ -1201,23 +1355,30 @@ def render_duel(engine, output_path, hint_mode="pinyin"):
     f_sub = _get_font(20)
     f_char = _get_font(50)
     f_py = _get_font(26)
+    f_punct = _get_font(32)
     f_hint = _get_font(14)
 
     draw.text((img_w // 2, 18), "诗词对垒", fill=(30, 30, 30), font=f_title, anchor="mt")
 
     x_left = pad
-    x_right = pad + side_w + mid_gap
+    x_right = pad + side_w_max + mid_gap
 
-    draw.text((x_left + side_w // 2, pad + header_h - 20), f"{engine.a_name} 猜 {engine.b_name} 的题", fill=(40, 40, 40), font=f_sub, anchor="mm")
-    draw.text((x_right + side_w // 2, pad + header_h - 20), f"{engine.b_name} 猜 {engine.a_name} 的题", fill=(40, 40, 40), font=f_sub, anchor="mm")
+    draw.text((x_left + side_w_max // 2, pad + header_h - 20), f"{engine.a_name} 猜 {engine.b_name} 的题", fill=(40, 40, 40), font=f_sub, anchor="mm")
+    draw.text((x_right + side_w_max // 2, pad + header_h - 20), f"{engine.b_name} 猜 {engine.a_name} 的题", fill=(40, 40, 40), font=f_sub, anchor="mm")
 
     y0 = pad + header_h + sub_h
 
-    # 首行空白框
-    for x0 in (x_left, x_right):
-        for i in range(n):
-            x = x0 + i * (cell_w + gap)
-            draw.rounded_rectangle([x, y0, x + cell_w, y0 + cell_h], radius=8, fill=CELL_BG, outline=BORDER_COLOR, width=2)
+    # 首行空白框（按各自布局）
+    for layout, x0 in ((layout_a, x_left), (layout_b, x_right)):
+        cx = x0
+        for t, _ in layout:
+            w = cell_w if t == "hanzi" else punct_w
+            if t == "hanzi":
+                draw.rounded_rectangle([cx, y0, cx + w, y0 + cell_h], radius=8, fill=CELL_BG, outline=BORDER_COLOR, width=2)
+            else:
+                draw.rounded_rectangle([cx, y0, cx + w, y0 + cell_h], radius=6, fill=(245, 245, 248),
+                                       outline=(210, 210, 215), width=1)
+            cx += w + gap
 
     # 猜测历史
     a_syl_set = _build_syllable_set(engine.a_target_parts)  # A 猜 B 的题
@@ -1225,12 +1386,12 @@ def render_duel(engine, output_path, hint_mode="pinyin"):
     for row_idx in range(n_rows):
         y = y0 + (row_idx + 1) * (cell_h + gap)
         if row_idx < len(engine.a_history):
-            _draw_battle_row(draw, x_left, y, n, cell_w, cell_h, gap,
-                             engine.a_history[row_idx][1], engine.a_history[row_idx][2], f_char, f_py,
+            _draw_battle_row(draw, x_left, y, layout_a, cell_w, punct_w, cell_w, cell_h, gap,
+                             engine.a_history[row_idx][1], engine.a_history[row_idx][2], f_char, f_py, f_punct,
                              a_syl_set)
         if row_idx < len(engine.b_history):
-            _draw_battle_row(draw, x_right, y, n, cell_w, cell_h, gap,
-                             engine.b_history[row_idx][1], engine.b_history[row_idx][2], f_char, f_py,
+            _draw_battle_row(draw, x_right, y, layout_b, cell_w, punct_w, cell_w, cell_h, gap,
+                             engine.b_history[row_idx][1], engine.b_history[row_idx][2], f_char, f_py, f_punct,
                              b_syl_set)
 
     if engine.winner:
@@ -1251,21 +1412,35 @@ def render_duel_radical(engine, output_path):
     - 字：对位绿 / 错位存在橙 / 不存在灰
     - 边框：部首对位绿（字对位时） / 部首错位存在橙 / 部首不存在灰
     """
-    n = len(engine.a_target_parts)
+    a_punct = engine.a_target_punct
+    b_punct = engine.b_target_punct
+    n_a = len(engine.a_target_hanzi)
+    n_b = len(engine.b_target_hanzi)
+    layout_a = _build_duel_layout(a_punct, n_a)
+    layout_b = _build_duel_layout(b_punct, n_b)
+
     pad = 30
     header_h = 70
     sub_h = 50
     cell_h = 150
     gap = 8
     cell_w = 120
+    punct_w = 36
     mid_gap = 40
+
+    def side_w(layout):
+        w = 0
+        for t, _ in layout:
+            w += (cell_w if t == "hanzi" else punct_w) + gap
+        return w
+
+    side_w_max = max(side_w(layout_a), side_w(layout_b))
 
     rows_a = max(1, len(engine.a_history))
     rows_b = max(1, len(engine.b_history))
     n_rows = max(rows_a, rows_b)
 
-    side_w = n * cell_w + (n - 1) * gap
-    img_w = pad * 2 + side_w * 2 + mid_gap
+    img_w = pad * 2 + side_w_max * 2 + mid_gap
     img_h = pad + header_h + sub_h + (n_rows + 1) * (cell_h + gap) + 70
 
     img = Image.new("RGB", (img_w, img_h), (250, 250, 252))
@@ -1274,33 +1449,40 @@ def render_duel_radical(engine, output_path):
     f_title = _get_font(28)
     f_sub = _get_font(20)
     f_char = _get_font(64)
+    f_punct = _get_font(32)
     f_hint = _get_font(14)
 
     draw.text((img_w // 2, 18), "诗词对垒 · 部首提示", fill=(30, 30, 30), font=f_title, anchor="mt")
 
     x_left = pad
-    x_right = pad + side_w + mid_gap
+    x_right = pad + side_w_max + mid_gap
 
-    draw.text((x_left + side_w // 2, pad + header_h - 20), f"{engine.a_name} 猜 {engine.b_name} 的题", fill=(40, 40, 40), font=f_sub, anchor="mm")
-    draw.text((x_right + side_w // 2, pad + header_h - 20), f"{engine.b_name} 猜 {engine.a_name} 的题", fill=(40, 40, 40), font=f_sub, anchor="mm")
+    draw.text((x_left + side_w_max // 2, pad + header_h - 20), f"{engine.a_name} 猜 {engine.b_name} 的题", fill=(40, 40, 40), font=f_sub, anchor="mm")
+    draw.text((x_right + side_w_max // 2, pad + header_h - 20), f"{engine.b_name} 猜 {engine.a_name} 的题", fill=(40, 40, 40), font=f_sub, anchor="mm")
 
     y0 = pad + header_h + sub_h
 
     # 首行空白框
-    for x0 in (x_left, x_right):
-        for i in range(n):
-            x = x0 + i * (cell_w + gap)
-            draw.rounded_rectangle([x, y0, x + cell_w, y0 + cell_h], radius=8, fill=CELL_BG, outline=BORDER_COLOR, width=2)
+    for layout, x0 in ((layout_a, x_left), (layout_b, x_right)):
+        cx = x0
+        for t, _ in layout:
+            w = cell_w if t == "hanzi" else punct_w
+            if t == "hanzi":
+                draw.rounded_rectangle([cx, y0, cx + w, y0 + cell_h], radius=8, fill=CELL_BG, outline=BORDER_COLOR, width=2)
+            else:
+                draw.rounded_rectangle([cx, y0, cx + w, y0 + cell_h], radius=6, fill=(245, 245, 248),
+                                       outline=(210, 210, 215), width=1)
+            cx += w + gap
 
     # 猜测历史（部首模式）
     for row_idx in range(n_rows):
         y = y0 + (row_idx + 1) * (cell_h + gap)
         if row_idx < len(engine.a_history):
-            _draw_radical_row(draw, x_left, y, n, cell_w, cell_h, gap,
-                              engine.a_history[row_idx][0], engine.a_target_parts, f_char)
+            _draw_radical_row(draw, x_left, y, layout_a, cell_w, punct_w, cell_h, gap,
+                              engine.a_history[row_idx][0], engine.a_target_parts, f_char, f_punct)
         if row_idx < len(engine.b_history):
-            _draw_radical_row(draw, x_right, y, n, cell_w, cell_h, gap,
-                              engine.b_history[row_idx][0], engine.b_target_parts, f_char)
+            _draw_radical_row(draw, x_right, y, layout_b, cell_w, punct_w, cell_h, gap,
+                              engine.b_history[row_idx][0], engine.b_target_parts, f_char, f_punct)
 
     if engine.winner:
         wname = engine.side_name(engine.winner)
@@ -1313,13 +1495,21 @@ def render_duel_radical(engine, output_path):
     return output_path
 
 
-def _draw_radical_row(draw, x0, y, n, cell_w, cell_h, gap, guess_text, target_parts, f_char):
-    """渲染一行部首模式的猜测：每格放大汉字 + 颜色信号边框。"""
+def _draw_radical_row(draw, x0, y, layout, cell_w, punct_w, cell_h, gap, guess_text, target_parts, f_char, f_punct):
+    """渲染一行部首模式的猜测：每格放大汉字 + 颜色信号边框，支持标点分隔列。"""
     guess_chars = list(extract_hanzi(guess_text))
     answer_chars = [p["char"] for p in target_parts]
     char_status, rad_status = radical_status(guess_chars, answer_chars)
-    for i in range(n):
-        x = x0 + i * (cell_w + gap)
+    cx = x0
+    for col_type, col_val in layout:
+        if col_type == "punct":
+            draw.rounded_rectangle([cx, y, cx + punct_w, y + cell_h], radius=6, fill=(245, 245, 248),
+                                   outline=(210, 210, 215), width=1)
+            draw.text((cx + punct_w // 2, y + cell_h // 2), col_val, fill=(90, 90, 95), font=f_punct, anchor="mm")
+            cx += punct_w + gap
+            continue
+        i = col_val
+        x = cx
         # 边框颜色：部首错位存在 -> 橙；部首不存在 -> 灰；部首对位 -> 绿（字对位时）
         if rad_status[i] == "present":
             border = (230, 110, 0)
@@ -1332,3 +1522,4 @@ def _draw_radical_row(draw, x0, y, n, cell_w, cell_h, gap, guess_text, target_pa
         if ch:
             cc = {"correct": (0, 150, 40), "present": (230, 110, 0), "absent": (160, 160, 160)}[char_status[i]]
             draw.text((x + cell_w // 2, y + cell_h // 2), ch, fill=cc, font=f_char, anchor="mm")
+        cx += cell_w + gap

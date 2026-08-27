@@ -18,6 +18,7 @@ from .game.snake_poetry import PoetrySnakeEngine
 from .game.guess_verse import GuessVerseEngine, render_grid, render_blank, render_answer, render_hint, _init_plugin_dir
 from .game.guess_verse import pick_battle_target, BattleVerseEngine, render_battle
 from .game.guess_verse import DuelVerseEngine, render_duel, pick_puzzle_verse
+from .game.guess_verse import extract_hanzi, extract_punct
 
 GITEE_BASE = "https://gitee.com/alin1031/poetry-data/releases/download/v1.0.0/poetry_data.zip"
 GITEE_PROBE = GITEE_BASE + ".part01"  # 探测分片而非基文件（基文件不存在）
@@ -394,45 +395,46 @@ class PoetryPlugin(Star):
             yield event.plain_result("游戏进行中！发送诗句进行猜测，或发送【结束猜诗句】退出。")
             return
 
-        # ===== 解析参数：长度(4-7) / 提示方式(声|形)，可组合任意顺序 =====
-        word_len = None
+        # ===== 解析参数：格式(4/5/6/7 或 44/34/43/55/77) / 提示方式(声|形)，可组合任意顺序 =====
+        fmt = None
         hint_mode = None
         msg_text = str(event.get_message_str() or "")
         remainder = re.sub(r"^[/／]?\s*猜诗句", "", msg_text, flags=re.IGNORECASE)
         remainder = re.sub(r"\s+", " ", remainder).strip()
-        valid_len = {"4", "5", "6", "7"}
         for token in remainder.split(" "):
             if not token:
                 continue
-            if token in valid_len:
-                if word_len is not None:
-                    yield event.plain_result("❌ 只能指定一个长度（4/5/6/7）。\n用法：/猜诗句 [4|5|6|7] [声|形]")
+            parsed = self._parse_poem_format(token)
+            if parsed:
+                if fmt is not None:
+                    yield event.plain_result("❌ 只能指定一种格式（4/5/6/7 单句 或 44/34/43/55/77 两句）。\n用法：/猜诗句 [格式] [声|形]")
                     return
-                word_len = int(token)
+                fmt = parsed
             elif token in ("声", "形", "拼音", "部首"):
                 if hint_mode is not None:
-                    yield event.plain_result("❌ 只能指定一种提示方式（声=拼音 / 形=部首）。\n用法：/猜诗句 [4|5|6|7] [声|形]")
+                    yield event.plain_result("❌ 只能指定一种提示方式（声=拼音 / 形=部首）。\n用法：/猜诗句 [格式] [声|形]")
                     return
                 hint_mode = "pinyin" if token in ("声", "拼音") else "radical"
             else:
                 yield event.plain_result(
-                    f"❌ 无效参数「{token}」。\n用法：/猜诗句 [4|5|6|7] [声|形]\n"
-                    f"例如：/猜诗句 4 声 ｜ /猜诗句 形 ｜ /猜诗句 5"
+                    f"❌ 无效参数「{token}」。\n用法：/猜诗句 [格式] [声|形]\n"
+                    f"格式：4/5/6/7 单句，或 44/34/43/55/77 两句\n"
+                    f"例如：/猜诗句 4 声 ｜ /猜诗句 55 ｜ /猜诗句 形 7"
                 )
                 return
 
-        # 未指定长度 -> 随机：4字10% / 6字10% / 5、7字各40%
-        if word_len is None:
+        # 未指定格式 -> 随机单句：4字10% / 6字10% / 5、7字各40%
+        if fmt is None:
             import random as _r
             roll = _r.random()
             if roll < 0.10:
-                word_len = 4
+                fmt = ("single", 4)
             elif roll < 0.20:
-                word_len = 6
+                fmt = ("single", 6)
             elif roll < 0.60:
-                word_len = 5
+                fmt = ("single", 5)
             else:
-                word_len = 7
+                fmt = ("single", 7)
 
         # 未指定提示方式 -> 随机：声70% / 形30%
         if hint_mode is None:
@@ -441,7 +443,10 @@ class PoetryPlugin(Star):
 
         engine = GuessVerseEngine(self.db, None, 4, 7,
                                   classic_poems=self.classic_poems, hint_mode=hint_mode)
-        ok, msg = engine.new_game(word_len=word_len)
+        if fmt[0] == "single":
+            ok, msg = engine.new_game(word_len=fmt[1])
+        else:
+            ok, msg = engine.new_game(combo=fmt[1])
         if not ok:
             yield event.plain_result(f"❌ 初始化失败：{msg}")
             return
@@ -450,8 +455,8 @@ class PoetryPlugin(Star):
         hint_label = "拼音" if hint_mode == "pinyin" else "部首"
         yield event.plain_result(
             "🎯 【猜诗句】开始！\n"
-            f"答案是一句 {len(engine.target_hanzi)} 字的单句，提示方式：{hint_label}。\n"
-            "发送「cc 诗句」进行猜测，如：cc 床前明月光\n"
+            f"答案格式：{self._format_desc(fmt)}，提示方式：{hint_label}。\n"
+            "发送「cc 诗句」进行猜测（两句需带标点），如：cc 离离原上草，一岁一枯荣\n"
             "每次猜测后，每个字的【汉字/声母/韵母/声调】独立着色（拼音模式）：\n"
             "🟢 绿色 = 正确且位置正确\n"
             "🟠 橙色 = 答案中存在但位置错误\n"
@@ -511,6 +516,27 @@ class PoetryPlugin(Star):
         if m:
             return m.group(1)
         return None
+
+    @staticmethod
+    def _parse_poem_format(token):
+        """解析诗句格式 token。返回 ('single', n) 或 ('combo', (a, b)) 或 None。
+        支持：4/5/6/7 单句；44/34/43/55/77 两句。
+        """
+        token = str(token).strip()
+        if token in ("4", "5", "6", "7"):
+            return ("single", int(token))
+        combos = {"44": (4, 4), "34": (3, 4), "43": (4, 3), "55": (5, 5), "77": (7, 7)}
+        if token in combos:
+            return ("combo", combos[token])
+        return None
+
+    @staticmethod
+    def _format_desc(fmt):
+        """格式化描述：('single',5)->「5字单句」；('combo',(5,5))->「5字+5字」"""
+        if fmt[0] == "single":
+            return f"{fmt[1]} 字单句"
+        a, b = fmt[1]
+        return f"{a} 字+{b} 字（两句）"
 
     @filter.command("邀战猜诗词")
     async def invite_battle(self, event: AstrMessageEvent):
@@ -631,9 +657,9 @@ class PoetryPlugin(Star):
         sender_id = str(event.get_sender_id())
         sender_name = event.get_sender_name() or f"用户{sender_id}"
 
-        # ===== 解析参数：@某人 / 长度(4-7) / 提示方式(声|形)，可组合任意顺序 =====
+        # ===== 解析参数：@某人 / 格式(4-7 或 44/34/43/55/77) / 提示方式(声|形)，可组合任意顺序 =====
         target_id = self._extract_at_id(event)
-        word_len = None
+        fmt = None
         hint_mode = None
         msg_text = str(event.get_message_str() or "")
         # 去掉指令前缀（可能带/或不带/）和 @ 片段后的剩余文本
@@ -642,24 +668,25 @@ class PoetryPlugin(Star):
         remainder = re.sub(r"@\d{5,12}", " ", remainder)
         remainder = re.sub(r"\s+", " ", remainder).strip()
 
-        valid_len = {"4", "5", "6", "7"}
         for token in remainder.split(" "):
             if not token:
                 continue
-            if token in valid_len:
-                if word_len is not None:
-                    yield event.plain_result("❌ 只能指定一个长度（4/5/6/7）。\n用法：/诗词对垒 [@某人] [4|5|6|7] [声|形]")
+            parsed = self._parse_poem_format(token)
+            if parsed:
+                if fmt is not None:
+                    yield event.plain_result("❌ 只能指定一种格式（4/5/6/7 单句 或 44/34/43/55/77 两句）。\n用法：/诗词对垒 [@某人] [格式] [声|形]")
                     return
-                word_len = int(token)
+                fmt = parsed
             elif token in ("声", "形", "拼音", "部首"):
                 if hint_mode is not None:
-                    yield event.plain_result("❌ 只能指定一种提示方式（声=拼音 / 形=部首）。\n用法：/诗词对垒 [@某人] [4|5|6|7] [声|形]")
+                    yield event.plain_result("❌ 只能指定一种提示方式（声=拼音 / 形=部首）。\n用法：/诗词对垒 [@某人] [格式] [声|形]")
                     return
                 hint_mode = "pinyin" if token in ("声", "拼音") else "radical"
             else:
                 yield event.plain_result(
-                    f"❌ 无效参数「{token}」。\n用法：/诗词对垒 [@某人] [4|5|6|7] [声|形]\n"
-                    f"例如：/诗词对垒 4 声 ｜ /诗词对垒 形 @某人 ｜ /诗词对垒 5"
+                    f"❌ 无效参数「{token}」。\n用法：/诗词对垒 [@某人] [格式] [声|形]\n"
+                    f"格式：4/5/6/7 单句，或 44/34/43/55/77 两句\n"
+                    f"例如：/诗词对垒 4 声 ｜ /诗词对垒 55 形 @某人 ｜ /诗词对垒 7"
                 )
                 return
 
@@ -667,18 +694,18 @@ class PoetryPlugin(Star):
             yield event.plain_result("不能挑战自己哦~")
             return
 
-        # 未指定长度 -> 随机：4字10% / 6字10% / 5、7字各40%
-        if word_len is None:
+        # 未指定格式 -> 随机单句：4字10% / 6字10% / 5、7字各40%
+        if fmt is None:
             import random as _r
             roll = _r.random()
             if roll < 0.10:
-                word_len = 4
+                fmt = ("single", 4)
             elif roll < 0.20:
-                word_len = 6
+                fmt = ("single", 6)
             elif roll < 0.60:
-                word_len = 5
+                fmt = ("single", 5)
             else:
-                word_len = 7
+                fmt = ("single", 7)
 
         # 未指定提示方式 -> 随机：声70% / 形30%
         if hint_mode is None:
@@ -702,7 +729,7 @@ class PoetryPlugin(Star):
             "challenger_name": sender_name,
             "opponent_id": target_id,   # 无@则为 None，由第一个回复【接受】者担任
             "opponent_name": target_name,
-            "word_len": word_len,
+            "fmt": fmt,
             "hint_mode": hint_mode,
             "puzzles": {},        # {user_id: sentence}
             "puzzle_done": set(), # 已出题的人
@@ -712,11 +739,12 @@ class PoetryPlugin(Star):
         }
 
         hint_label = "拼音" if hint_mode == "pinyin" else "部首"
+        fmt_desc = self._format_desc(fmt)
         if target_id:
             yield event.plain_result(
                 f"🍵 【诗词对垒】\n"
                 f"{sender_name} 向 {target_name} 发起对垒！\n"
-                f"双方各出 {word_len} 字诗句（曲库中，前缀「cc」）作为题目，随后互猜对方诗句，先猜中者获胜。\n"
+                f"双方各出「{fmt_desc}」诗句（曲库中，前缀「cc」）作为题目，随后互猜对方诗句，先猜中者获胜。\n"
                 f"提示方式：{hint_label}\n"
                 f"请 {target_name} 回复【接受】开始，或回复【拒绝】。（2 分钟内有效）"
             )
@@ -724,7 +752,7 @@ class PoetryPlugin(Star):
             yield event.plain_result(
                 f"🍵 【诗词对垒】\n"
                 f"{sender_name} 发起自由对垒！\n"
-                f"双方各出 {word_len} 字诗句（曲库中，前缀「cc」）作为题目，随后互猜对方诗句，先猜中者获胜。\n"
+                f"双方各出「{fmt_desc}」诗句（曲库中，前缀「cc」）作为题目，随后互猜对方诗句，先猜中者获胜。\n"
                 f"提示方式：{hint_label}\n"
                 f"第一个回复【接受】的群成员将作为对手。（2 分钟内有效）"
             )
@@ -835,15 +863,16 @@ class PoetryPlugin(Star):
                     return
                 if msg_raw in ("接受", "同意", "应战"):
                     duel["state"] = "wait_puzzle"
-                    wl = duel["word_len"]
+                    fmt_desc = self._format_desc(duel.get("fmt"))
                     hl = "拼音" if duel.get("hint_mode") == "pinyin" else "部首"
-                    hint = (f"🍵 【诗词对垒】提示方式：{hl}\n"
-                            f"请发送一句 {wl} 字诗句作为你的题目（总库中，前缀「cc」）。\n例：cc 床前明月光")
+                    hint = (f"🍵 【诗词对垒】提示方式：{hl}，格式：{fmt_desc}\n"
+                            f"请发送「{fmt_desc}」诗句作为你的题目（总库中，前缀「cc」）。\n"
+                            f"单句例：cc 床前明月光 ｜ 两句例：cc 离离原上草，一岁一枯荣")
                     ok_a = await self._send_private(event.bot, duel["challenger_id"], hint)
                     ok_b = await self._send_private(event.bot, duel["opponent_id"], hint)
                     _block_llm()
                     if ok_a and ok_b:
-                        yield event.plain_result(f"🍵 对垒开始！已私聊双方提示出题（各 {wl} 字），出题完成后在群聊公开互猜。")
+                        yield event.plain_result(f"🍵 对垒开始！已私聊双方提示出题（{fmt_desc}），出题完成后在群聊公开互猜。")
                     else:
                         yield event.plain_result(
                             f"⚠️ 私聊出题失败（机器人需与双方互为好友才能私聊）。\n"
@@ -868,15 +897,16 @@ class PoetryPlugin(Star):
                     duel["opponent_id"] = uid
                     duel["opponent_name"] = event.get_sender_name() or f"用户{uid}"
                     duel["state"] = "wait_puzzle"
-                    wl = duel["word_len"]
+                    fmt_desc = self._format_desc(duel.get("fmt"))
                     hl = "拼音" if duel.get("hint_mode") == "pinyin" else "部首"
-                    hint = (f"🍵 【诗词对垒】提示方式：{hl}\n"
-                            f"请发送一句 {wl} 字诗句作为你的题目（总库中，前缀「cc」）。\n例：cc 床前明月光")
+                    hint = (f"🍵 【诗词对垒】提示方式：{hl}，格式：{fmt_desc}\n"
+                            f"请发送「{fmt_desc}」诗句作为你的题目（总库中，前缀「cc」）。\n"
+                            f"单句例：cc 床前明月光 ｜ 两句例：cc 离离原上草，一岁一枯荣")
                     ok_a = await self._send_private(event.bot, duel["challenger_id"], hint)
                     ok_b = await self._send_private(event.bot, uid, hint)
                     _block_llm()
                     if ok_a and ok_b:
-                        yield event.plain_result(f"🍵 {event.get_sender_name()} 接受对垒！已私聊双方提示出题（各 {wl} 字），出题完成后在群聊公开互猜。")
+                        yield event.plain_result(f"🍵 {event.get_sender_name()} 接受对垒！已私聊双方提示出题（{fmt_desc}），出题完成后在群聊公开互猜。")
                     else:
                         yield event.plain_result(
                             f"⚠️ 私聊出题失败（机器人需与双方互为好友才能私聊）。\n"
@@ -900,15 +930,30 @@ class PoetryPlugin(Star):
                 return
             clean = re.sub(r'^cc\s*', '', msg_raw).strip()
             hanzi = re.sub(r'[^\u4e00-\u9fff]', '', clean)
-            if len(hanzi) != duel["word_len"]:
-                _block_llm()
-                yield event.plain_result(f"题目需为 {duel['word_len']} 字，当前 {len(hanzi)} 字。")
-                return
-            # 出题也校验总库，保证题目可被对方猜中
-            if not self._is_in_library(clean):
-                _block_llm()
-                yield event.plain_result(f"「{clean}」不在诗词库中，请输入曲库诗句作为题目。")
-                return
+            fmt = duel.get("fmt")
+            fmt_kind = fmt[0] if fmt else "single"
+            if fmt_kind == "single":
+                need = fmt[1]
+                if len(hanzi) != need:
+                    _block_llm()
+                    yield event.plain_result(f"题目需为 {need} 字单句，当前 {len(hanzi)} 字。")
+                    return
+                if not self._is_in_library(clean):
+                    _block_llm()
+                    yield event.plain_result(f"「{clean}」不在诗词库中，请输入曲库诗句作为题目。")
+                    return
+            else:
+                a_len, b_len = fmt[1]
+                segs = re.split(r'[，。！？、；：]', clean)
+                segs = [re.sub(r'[^\u4e00-\u9fff]', '', s) for s in segs if re.sub(r'[^\u4e00-\u9fff]', '', s)]
+                if len(segs) != 2 or len(segs[0]) != a_len or len(segs[1]) != b_len:
+                    _block_llm()
+                    yield event.plain_result(f"题目需为「{a_len} 字+{b_len} 字」两句（带标点），当前格式不符。")
+                    return
+                if not self.db or not self.db.is_adjacent_pair(segs[0], segs[1]):
+                    _block_llm()
+                    yield event.plain_result(f"「{clean}」未在诗词库中（两句需为库中某首的相邻两句）。")
+                    return
             duel["puzzles"][uid] = clean
             duel["puzzle_done"].add(uid)
             _block_llm()
@@ -951,13 +996,25 @@ class PoetryPlugin(Star):
                 return
             clean = re.sub(r'^cc\s*', '', msg_raw).strip()
             hanzi = re.sub(r'[^\u4e00-\u9fff]', '', clean)
-            if not hanzi or len(hanzi) != len(engine.target_parts_of(engine.current_side())):
+            side = "a" if uid == engine.a_id else "b"
+            target_punct = engine.a_target_punct if side == "a" else engine.b_target_punct
+            target_len = len(engine.a_target_hanzi if side == "a" else engine.b_target_hanzi)
+            if not hanzi or len(hanzi) != target_len:
                 _block_llm()
                 return
-            if not self._is_in_library(clean):
-                _block_llm()
-                yield event.plain_result(f"「{clean}」不在诗词库中，请输入曲库诗句。")
-                return
+            # 库校验（两句需为库中相邻两句）
+            if target_punct:
+                segs = re.split(r'[，。！？、；：]', clean)
+                segs = [re.sub(r'[^\u4e00-\u9fff]', '', s) for s in segs if re.sub(r'[^\u4e00-\u9fff]', '', s)]
+                if len(segs) != 2 or not self.db or not self.db.is_adjacent_pair(segs[0], segs[1]):
+                    _block_llm()
+                    yield event.plain_result(f"「{clean}」未在诗词库中（需为库中相邻两句）。")
+                    return
+            else:
+                if not self._is_in_library(clean):
+                    _block_llm()
+                    yield event.plain_result(f"「{clean}」不在诗词库中，请输入曲库诗句。")
+                    return
             ok, err, side, comp, all_correct = engine.guess(uid, clean)
             if not ok:
                 _block_llm()
@@ -1367,11 +1424,24 @@ class PoetryPlugin(Star):
             if not hanzi or len(hanzi) != len(engine.target_hanzi):
                 yield event.plain_result(f"答案 {len(engine.target_hanzi)} 个字，当前 {len(hanzi)} 字。请输入「cc 诗句」。")
                 return
-            # 判在不在总库中
-            if not self._is_in_library(clean):
-                yield event.plain_result(f"「{clean}」不在诗词库中，请输入曲库诗句。")
+            # 判格式（单句需无标点；两句需带标点且分句字数匹配）
+            ok_fmt, fmt_msg = engine.check_format(clean)
+            if not ok_fmt:
+                yield event.plain_result(fmt_msg or "格式不正确。")
                 return
-            ok, err, comp, all_correct = engine.guess(hanzi)
+            # 判在不在总库中（两句需是库中相邻两句）
+            if extract_punct(clean):
+                # 两句：按标点切分，校验相邻
+                segs = re.split(r'[，。！？、；：]', clean)
+                segs = [re.sub(r'[^\u4e00-\u9fff]', '', s) for s in segs if re.sub(r'[^\u4e00-\u9fff]', '', s)]
+                if len(segs) != 2 or not self.db or not self.db.is_adjacent_pair(segs[0], segs[1]):
+                    yield event.plain_result(f"「{clean}」未在诗词库中（需为库中相邻两句）。")
+                    return
+            else:
+                if not self._is_in_library(clean):
+                    yield event.plain_result(f"「{clean}」不在诗词库中，请输入曲库诗句。")
+                    return
+            ok, err, comp, all_correct = engine.guess(clean)
             if not ok:
                 # 不合规的猜测静默忽略，不回复，不占次数
                 return
