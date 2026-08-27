@@ -465,7 +465,7 @@ class GuessVerseEngine:
         self.final_status = {}
 
     def format_desc(self):
-        """返回答案格式描述，如「5字单句」「5字+5字（两句）」。"""
+        """返回答案格式描述，如「5字单句」「5字+5字（两句）」。末尾标点不计。"""
         punct = self.target_punct
         if not punct:
             return f"{len(self.target_hanzi)} 字单句"
@@ -474,6 +474,8 @@ class GuessVerseEngine:
         cur = 0
         hanzi = self.target_hanzi
         for pos, p in punct:
+            if pos >= len(hanzi):
+                continue  # 末尾标点不计
             lens.append(pos - cur)
             cur = pos
         lens.append(len(hanzi) - cur)
@@ -482,6 +484,7 @@ class GuessVerseEngine:
     def check_format(self, text):
         """校验猜测文本的格式是否与答案一致。返回 (ok, msg)。
         text 为含标点的完整句。单句答案须无标点且字数一致；两句答案须有标点且各分句字数匹配。
+        末尾标点（句号/感叹号等，位置==汉字总数）不作为分句分隔计入。
         """
         hanzi = extract_hanzi(text)
         punct = extract_punct(text)
@@ -489,19 +492,18 @@ class GuessVerseEngine:
             # 单句
             return len(hanzi) == len(self.target_hanzi), None
         if punct and self.target_punct:
-            # 两句：比较各分句字数
-            g_lens = []
-            cur = 0
-            for pos, p in punct:
-                g_lens.append(pos - cur)
-                cur = pos
-            g_lens.append(len(hanzi) - cur)
-            t_lens = []
-            cur = 0
-            for pos, p in self.target_punct:
-                t_lens.append(pos - cur)
-                cur = pos
-            t_lens.append(len(self.target_hanzi) - cur)
+            # 两句：比较各分句字数（忽略末尾标点产生的空分句）
+            def _lens(h, ps):
+                ps = [pp for pp in ps if pp[0] < len(h)]  # 只把后面还有汉字的标点当分隔
+                lens = []
+                cur = 0
+                for pos, p in ps:
+                    lens.append(pos - cur)
+                    cur = pos
+                lens.append(len(h) - cur)
+                return lens
+            g_lens = _lens(hanzi, punct)
+            t_lens = _lens(self.target_hanzi, self.target_punct)
             if g_lens == t_lens and len(hanzi) == len(self.target_hanzi):
                 return True, None
             return False, f"格式需为 {'、'.join(str(x) for x in t_lens)} 字分句（如：带标点的一句）"
@@ -1246,25 +1248,25 @@ class DuelVerseEngine:
         return True, "", side, comp, all_correct
 
     @staticmethod
+    @staticmethod
     def check_format(text, target_hanzi, target_punct):
-        """校验猜测格式与目标一致。"""
+        """校验猜测格式与目标一致。末尾标点（位置==汉字总数）不作为分句分隔计入。"""
         hanzi = extract_hanzi(text)
         punct = extract_punct(text)
         if not punct and not target_punct:
             return True, None  # 都是单句
         if punct and target_punct:
-            g_lens = []
-            cur = 0
-            for pos, p in punct:
-                g_lens.append(pos - cur)
-                cur = pos
-            g_lens.append(len(hanzi) - cur)
-            t_lens = []
-            cur = 0
-            for pos, p in target_punct:
-                t_lens.append(pos - cur)
-                cur = pos
-            t_lens.append(len(target_hanzi) - cur)
+            def _lens(h, ps):
+                ps = [pp for pp in ps if pp[0] < len(h)]  # 只把后面还有汉字的标点当分隔
+                lens = []
+                cur = 0
+                for pos, p in ps:
+                    lens.append(pos - cur)
+                    cur = pos
+                lens.append(len(h) - cur)
+                return lens
+            g_lens = _lens(hanzi, punct)
+            t_lens = _lens(target_hanzi, target_punct)
             if g_lens == t_lens:
                 return True, None
             return False, f"格式需为 {'、'.join(str(x) for x in t_lens)} 字分句（两句需带标点）"
@@ -1279,6 +1281,8 @@ class DuelVerseEngine:
         lens = []
         cur = 0
         for pos, p in punct:
+            if pos >= len(hanzi):
+                continue  # 末尾标点不计
             lens.append(pos - cur)
             cur = pos
         lens.append(len(hanzi) - cur)
