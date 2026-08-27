@@ -811,6 +811,9 @@ class PoetryPlugin(Star):
         # 私聊判断：无群号即为私聊（不依赖 is_private_chat，更可靠）
         is_private = is_private or not group_id or group_id == "None"
 
+        # 确保总库已加载（惰性加载，DB 存在才启用；对垒出题/猜测的库校验依赖它）
+        self._ensure_db()
+
         # 命令类消息不进入对垒处理（避免 /诗词对垒 命令被二次吞掉）
         if msg_raw.startswith("/"):
             return
