@@ -23,11 +23,9 @@ ACHIEVEMENTS = {
     "minimalist": ("极简主义", "十次以内成功完成一次猜诗词"),
     "first_hit": ("一发入魂", "第一次猜测即猜中"),
     "persistent": ("坚持不懈", "单局内个人累计发送 20 句仍未猜中"),
-    "closer_1": ("一阶收尾人", "作为本局最终猜中者 1 次"),
-    "closer_3": ("二阶收尾人", "作为本局最终猜中者 3 次"),
-    "closer_5": ("三阶收尾人", "作为本局最终猜中者 5 次"),
-    "closer_7": ("四阶收尾人", "作为本局最终猜中者 7 次"),
-    "closer_10": ("色彩收尾人", "作为本局最终猜中者 10 次"),
+    "closer": ("收尾人", "作为本局最终猜中者（随次数升级：一阶→二阶→三阶→四阶→色彩）"),
+    # 特殊
+    "pig": ("🐖", "一局中重复发送同一诗句（每重复一次加一只🐖）"),
     # 诗词对垒
     "duel_speed": ("速通", "十次内猜出对方诗句并获胜"),
     "duel_open": ("开了！", "五次内猜出对方诗句并获胜"),
@@ -46,9 +44,28 @@ ACHIEVEMENTS = {
     "seven_word": ("七言高手", "个人诗句库中 7 字单句累计 100 条"),
 }
 
-# 分阶成就顺序（同系成就按阈值判断）
-CLOSER_ACHIEVEMENTS = ["closer_1", "closer_3", "closer_5", "closer_7", "closer_10"]
-CLOSER_THRESHOLDS = [1, 3, 5, 7, 10]
+# 收尾人等级：按累计次数映射等级名（升序）
+CLOSER_LEVELS = [
+    (10, "色彩收尾人"),
+    (7, "四阶收尾人"),
+    (5, "三阶收尾人"),
+    (3, "二阶收尾人"),
+    (1, "一阶收尾人"),
+]
+
+
+def closer_level_name(progress):
+    """根据收尾人累计次数返回当前等级名（含阶位）。"""
+    if progress <= 0:
+        return "收尾人"
+    for thr, name in CLOSER_LEVELS:
+        if progress >= thr:
+            return name
+    return "收尾人"
+
+
+# 旧版收尾人分阶成就 id（用于迁移清空）
+_OLD_CLOSER_IDS = ["closer_1", "closer_3", "closer_5", "closer_7", "closer_10"]
 
 
 class PlayerManager:
@@ -69,6 +86,8 @@ class PlayerManager:
             p = self.players[uid]
             if name and p.get("name") != name:
                 p["name"] = name
+            if self._migrate(p):
+                self.save(uid)
             return p
         path = self._path(uid)
         p = None
@@ -96,7 +115,24 @@ class PlayerManager:
                 },
             }
         self.players[uid] = p
+        if self._migrate(p):
+            self.save(uid)
         return p
+
+    def _migrate(self, p):
+        """迁移旧数据：清空旧版分阶收尾人成就与 closer_count，从 0 重计。返回是否有改动。"""
+        changed = False
+        ach = p.get("achievements")
+        if isinstance(ach, dict):
+            for old in _OLD_CLOSER_IDS:
+                if old in ach:
+                    del ach[old]
+                    changed = True
+        st = p.get("stats")
+        if isinstance(st, dict) and st.get("closer_count"):
+            st["closer_count"] = 0
+            changed = True
+        return changed
 
     def save(self, uid):
         """立即写盘指定玩家。"""
@@ -196,13 +232,34 @@ class PlayerManager:
         return new
 
     def check_closer(self, uid, closer_count, name=""):
-        """检查收尾人分阶成就。closer_count 为累计收尾次数。返回新解锁列表。"""
-        new = []
-        for cid, thr in zip(CLOSER_ACHIEVEMENTS, CLOSER_THRESHOLDS):
-            if closer_count >= thr:
-                if self.unlock_achievement(uid, cid, name):
-                    new.append(cid)
-        return new
+        """更新收尾人累计次数并检查是否升级。closer_count 为累计收尾次数。
+        返回升级后的等级名（若跨入新等级），否则返回 None。"""
+        p = self.load(uid, name)
+        cur = p["achievements"].get("closer", {})
+        old_lv = closer_level_name(cur.get("progress", 0))
+        p["achievements"]["closer"] = {
+            "unlocked": True,
+            "time": cur.get("time", time.time()),
+            "progress": closer_count,
+        }
+        new_lv = closer_level_name(closer_count)
+        self.save(uid)
+        if new_lv != old_lv:
+            return new_lv
+        return None
+
+    def add_pig(self, uid, name=""):
+        """🐖 成就：一局中重复诗句计数 +1。返回最新累计数。"""
+        p = self.load(uid, name)
+        cur = p["achievements"].get("pig", {})
+        count = cur.get("progress", 0) + 1
+        p["achievements"]["pig"] = {
+            "unlocked": True,
+            "time": cur.get("time", time.time()),
+            "progress": count,
+        }
+        self.save(uid)
+        return count
 
     def get_achievements(self, uid):
         """返回玩家成就字典（含进度）。"""

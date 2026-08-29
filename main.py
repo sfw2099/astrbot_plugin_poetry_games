@@ -530,7 +530,17 @@ class PoetryPlugin(Star):
         for k, v in unlocked.items():
             name = ACHIEVEMENTS.get(k, (k, ""))[0]
             desc = ACHIEVEMENTS.get(k, (k, ""))[1]
-            lines.append(f"✅ {name} —— {desc}")
+            if k == "closer":
+                # 收尾人显示当前等级
+                from .player_data import closer_level_name
+                name = closer_level_name(v.get("progress", 0))
+                lines.append(f"✅ {name} —— 累计 {v.get('progress', 0)} 次")
+            elif k == "pig":
+                # 🐖 显示对应数量的🐖
+                count = v.get("progress", 0)
+                lines.append(f"✅ {name} x{count} —— {'🐖' * count}")
+            else:
+                lines.append(f"✅ {name} —— {desc}")
         # 未解锁但有进度
         progress_items = []
         for k, v in achs.items():
@@ -1079,6 +1089,15 @@ class PoetryPlugin(Star):
             # 记录猜测诗句到个人数据（仅合法猜测）
             self.pm.record_verse(uid, clean, event.get_sender_name() or f"用户{uid}")
             self.pm.inc_stat(uid, "total_guesses", 1, event.get_sender_name() or f"用户{uid}")
+            # 🐖 重复诗句检测（本局内自己发过的纯汉字）
+            if "user_verses" not in duel:
+                duel["user_verses"] = {}
+            duel["user_verses"].setdefault(uid, set())
+            if hanzi in duel["user_verses"][uid]:
+                pig_count = self.pm.add_pig(uid, event.get_sender_name() or f"用户{uid}")
+                yield event.plain_result(f"🐖 {event.get_sender_name() or f'用户{uid}'} 重复诗句！猪+1（{'🐖' * pig_count}）")
+            else:
+                duel["user_verses"][uid].add(hanzi)
             # 追踪对垒双方猜测次数
             if "guess_counts" not in duel:
                 duel["guess_counts"] = {}
@@ -1440,13 +1459,14 @@ class PoetryPlugin(Star):
                 if user_guesses.get(p_uid, 0) == 1:
                     if pm.unlock_achievement(p_uid, "first_hit", p_name):
                         msgs.append(self._achieve_msg(p_uid, "first_hit"))
-                # 收尾人计数
+                # 收尾人计数（升级制）
                 st = pm.load(p_uid).get("stats", {})
                 cc = st.get("closer_count", 0) + 1
                 st["closer_count"] = cc
                 pm.save(p_uid)
-                for a in pm.check_closer(p_uid, cc, p_name):
-                    msgs.append(self._achieve_msg(p_uid, a))
+                new_lv = pm.check_closer(p_uid, cc, p_name)
+                if new_lv:
+                    msgs.append(f"🏆 {p_name} 达成成就「{new_lv}」！")
         return msgs
 
     def _settle_duel_achievements(self, duel, engine, winner_side, winner_uid):
@@ -1671,8 +1691,16 @@ class PoetryPlugin(Star):
             if not hasattr(engine, "participants"):
                 engine.participants = set()
                 engine.user_guesses = {}
+                engine.user_verses = {}
             engine.participants.add(uid)
             engine.user_guesses[uid] = engine.user_guesses.get(uid, 0) + 1
+            # 🐖 重复诗句检测（本局内自己发过的纯汉字）
+            engine.user_verses.setdefault(uid, set())
+            if hanzi in engine.user_verses[uid]:
+                pig_count = self.pm.add_pig(uid, uname)
+                yield event.plain_result(f"🐖 {uname} 重复诗句！猪+1（{'🐖' * pig_count}）")
+            else:
+                engine.user_verses[uid].add(hanzi)
             # 记录诗句到个人数据
             self.pm.record_verse(uid, clean, uname)
             self.pm.inc_stat(uid, "total_guesses", 1, uname)
