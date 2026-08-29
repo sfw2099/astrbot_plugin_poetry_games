@@ -530,17 +530,18 @@ class PoetryPlugin(Star):
             lines.append("  （暂无成就，快去玩游戏吧！）")
         for k, v in unlocked.items():
             name = ACHIEVEMENTS.get(k, (k, ""))[0]
+            desc = ACHIEVEMENTS.get(k, (k, ""))[1]
             if k == "closer":
                 # 收尾人显示当前等级
                 from .player_data import closer_level_name
                 name = closer_level_name(v.get("progress", 0))
-                lines.append(f"✅ {name}（累计 {v.get('progress', 0)} 次）")
+                lines.append(f"✅ {name} —— 累计 {v.get('progress', 0)} 次")
             elif k == "pig":
                 # 🐖 显示对应数量的🐖
                 count = v.get("progress", 0)
                 lines.append(f"✅ {name} x{count} —— {'🐖' * count}")
             else:
-                lines.append(f"✅ {name}")
+                lines.append(f"✅ {name} —— {desc}")
         # 未解锁但有进度
         progress_items = []
         for k, v in achs.items():
@@ -1118,8 +1119,12 @@ class PoetryPlugin(Star):
                     duel["user_initials"][uid].add(gp["initial"])
                 if gp.get("final"):
                     duel["user_finals"][uid].add(gp["final"])
-            # 一事无成：一次猜测每个字全灰
-            if comp and all(c is not None and c.get("char") == "absent" for c in comp):
+            # 一事无成：一次猜测每个格子全灰（字/声母/韵母 均 absent，声调不参与判定）
+            if comp and all(
+                c is not None and c.get("char") == "absent"
+                and c.get("initial") == "absent" and c.get("final") == "absent"
+                for c in comp
+            ):
                 if self.pm.unlock_achievement(uid, "all_gray", event.get_sender_name() or f"用户{uid}"):
                     yield event.plain_result(self._achieve_msg(uid, "all_gray"))
             # 旗开得胜：首次猜测出现存在的字或完全正确的拼音
@@ -1781,8 +1786,12 @@ class PoetryPlugin(Star):
                     engine.user_initials[uid].add(gp["initial"])
                 if gp.get("final"):
                     engine.user_finals[uid].add(gp["final"])
-            # 一事无成：一次猜测每个字全灰
-            if comp and all(c is not None and c.get("char") == "absent" for c in comp):
+            # 一事无成：一次猜测每个格子全灰（字/声母/韵母 均 absent，声调不参与判定）
+            if comp and all(
+                c is not None and c.get("char") == "absent"
+                and c.get("initial") == "absent" and c.get("final") == "absent"
+                for c in comp
+            ):
                 if self.pm.unlock_achievement(uid, "all_gray", uname):
                     yield event.plain_result(self._achieve_msg(uid, "all_gray"))
             # 旗开得胜：首次猜测出现存在的字或完全正确的拼音
