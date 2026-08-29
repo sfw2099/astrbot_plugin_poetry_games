@@ -19,6 +19,7 @@ from .game.guess_verse import GuessVerseEngine, render_grid, render_blank, rende
 from .game.guess_verse import pick_battle_target, BattleVerseEngine, render_battle
 from .game.guess_verse import DuelVerseEngine, render_duel, pick_puzzle_verse
 from .game.guess_verse import extract_hanzi, extract_punct
+from .player_data import PlayerManager, ACHIEVEMENTS
 
 GITEE_BASE = "https://gitee.com/alin1031/poetry-data/releases/download/v1.0.0/poetry_data.zip"
 GITEE_PROBE = GITEE_BASE + ".part01"  # 探测分片而非基文件（基文件不存在）
@@ -50,6 +51,11 @@ class PoetryPlugin(Star):
 
         self.saves_dir = self.plugin_data_dir / 'saves'
         self.saves_dir.mkdir(parents=True, exist_ok=True)
+
+        # 玩家个人数据目录
+        self.players_dir = self.plugin_data_dir / 'players'
+        self.players_dir.mkdir(parents=True, exist_ok=True)
+        self.pm = PlayerManager(str(self.players_dir))
 
         self.db = None
         self.active_games = {}
@@ -494,6 +500,48 @@ class PoetryPlugin(Star):
             "例：/猜诗句 4 声 ｜ /猜诗句 形 ｜ /猜诗句 5"
         )
         yield event.plain_result(msg)
+
+    @filter.command("我的诗句")
+    async def my_verses(self, event: AstrMessageEvent):
+        """查看个人积累诗句（渲染成图片）。"""
+        uid = str(event.get_sender_id())
+        uname = event.get_sender_name() or f"用户{uid}"
+        verses = self.pm.get_verses(uid)
+        total = len(verses)
+        if total == 0:
+            yield event.plain_result(f"{uname} 还没有积累任何诗句，快去参与猜诗句/诗词对垒吧！")
+            return
+        from .game.guess_verse import render_verse_list
+        img_path = os.path.join(str(self.plugin_data_dir), f"my_verses_{uid}.png")
+        render_verse_list(uid, uname, verses, img_path)
+        yield event.plain_result(f"📚 {uname} 已积累 {total} 句诗：")
+        yield event.image_result(img_path)
+
+    @filter.command("我的成就")
+    async def my_achievements(self, event: AstrMessageEvent):
+        """查看已解锁成就及进度。"""
+        uid = str(event.get_sender_id())
+        uname = event.get_sender_name() or f"用户{uid}"
+        achs = self.pm.get_achievements(uid)
+        unlocked = {k: v for k, v in achs.items() if v.get("unlocked")}
+        lines = [f"🏅 {uname} 的成就（{len(unlocked)}/{len(ACHIEVEMENTS)}）："]
+        if not unlocked:
+            lines.append("  （暂无成就，快去玩游戏吧！）")
+        for k, v in unlocked.items():
+            name = ACHIEVEMENTS.get(k, (k, ""))[0]
+            desc = ACHIEVEMENTS.get(k, (k, ""))[1]
+            lines.append(f"✅ {name} —— {desc}")
+        # 未解锁但有进度
+        progress_items = []
+        for k, v in achs.items():
+            if not v.get("unlocked") and v.get("progress"):
+                name = ACHIEVEMENTS.get(k, (k, ""))[0]
+                progress_items.append(f"  ⏳ {name} 进度：{v['progress']}")
+        if progress_items:
+            lines.append("")
+            lines.append("进行中：")
+            lines.extend(progress_items)
+        yield event.plain_result("\n".join(lines))
 
     # ==========================================
     # ⚔️ 邀战猜诗词（对战）
@@ -959,6 +1007,8 @@ class PoetryPlugin(Star):
                     return
             duel["puzzles"][uid] = clean
             duel["puzzle_done"].add(uid)
+            # 记录出题诗句到个人数据
+            self.pm.record_verse(uid, clean, event.get_sender_name() or f"用户{uid}")
             _block_llm()
             # 双方都出题后进入猜测阶段 —— 状态变更放在 yield 之前，确保执行
             if len(duel["puzzle_done"]) >= 2:
@@ -971,16 +1021,19 @@ class PoetryPlugin(Star):
                 )
                 duel["engine"] = engine
                 duel["state"] = "playing"
+                # 心有灵犀：双方题同属一首诗
+                soulmate_msgs = self._check_soulmate(duel, a_id, b_id)
                 origin = duel.get("group_origin")
                 if origin:
                     try:
-                        await self.context.send_message(origin, MessageChain([
-                            Plain(f"🍵 双方已出题！开始互猜！\n"
-                                  f"{duel['challenger_name']} 猜 {duel['opponent_name']} 的题，{duel['opponent_name']} 猜 {duel['challenger_name']} 的题。\n"
-                                  f"先轮到：{engine.current_name()}（发送「cc 诗句」猜测）")
-                        ]))
+                        chain = [Plain(f"🍵 双方已出题！开始互猜！\n"
+                                       f"{duel['challenger_name']} 猜 {duel['opponent_name']} 的题，{duel['opponent_name']} 猜 {duel['challenger_name']} 的题。\n"
+                                       f"先轮到：{engine.current_name()}（发送「cc 诗句」猜测）")]
+                        await self.context.send_message(origin, MessageChain(chain))
                     except Exception as e:
                         logger.error(f"[duel] 群通知发送失败: {e}")
+                for m in soulmate_msgs:
+                    yield event.plain_result(m)
             yield event.plain_result(f"✅ 出题成功！题目：{clean}。等待对方出题...")
             return
 
@@ -1023,6 +1076,13 @@ class PoetryPlugin(Star):
                 _block_llm()
                 yield event.plain_result(err)
                 return
+            # 记录猜测诗句到个人数据（仅合法猜测）
+            self.pm.record_verse(uid, clean, event.get_sender_name() or f"用户{uid}")
+            self.pm.inc_stat(uid, "total_guesses", 1, event.get_sender_name() or f"用户{uid}")
+            # 追踪对垒双方猜测次数
+            if "guess_counts" not in duel:
+                duel["guess_counts"] = {}
+            duel["guess_counts"][uid] = duel["guess_counts"].get(uid, 0) + 1
             img_path = os.path.join(str(self.plugin_data_dir), f"duel_{sid}.png")
             render_duel(engine, img_path, hint_mode=duel.get("hint_mode", "pinyin"))
             _block_llm()
@@ -1034,11 +1094,20 @@ class PoetryPlugin(Star):
                     f"{engine.a_name} 的题：{engine.a_puzzle}\n"
                     f"{engine.b_name} 的题：{engine.b_puzzle}"
                 )
+                # ===== 对垒成就结算 =====
+                for m in self._settle_duel_achievements(duel, engine, side, uid):
+                    win_text += "\n" + m
                 self.duel_sessions.pop(sid)
                 yield event.image_result(img_path)
                 yield event.plain_result(win_text)
             else:
                 engine.switch_turn()
+                # 太阴了：双方各 ≥20 次仍未分出胜负
+                gc = duel.get("guess_counts", {})
+                if gc.get(engine.a_id, 0) >= 20 and gc.get(engine.b_id, 0) >= 20:
+                    for p in (engine.a_id, engine.b_id):
+                        if self.pm.unlock_achievement(p, "too_dark", self._uid_name(p)):
+                            yield event.plain_result(self._achieve_msg(p, "too_dark"))
                 yield event.image_result(img_path)
                 yield event.plain_result(f"轮到 {engine.current_name()}。")
             return
@@ -1312,6 +1381,154 @@ class PoetryPlugin(Star):
         except Exception as e:
             logger.error(f"⏱ 飞花令超时监控任务崩溃: {e}")
 
+    def _uid_name(self, uid):
+        """根据 uid 从本地玩家缓存取名字（尽力而为）。"""
+        try:
+            return self.pm.load(uid).get("name", f"用户{uid}")
+        except Exception:
+            return f"用户{uid}"
+
+    def _achieve_msg(self, uid, ach_id):
+        """生成成就解锁提示文案。"""
+        name = ACHIEVEMENTS.get(ach_id, (ach_id, ""))[0]
+        uname = self._uid_name(uid)
+        return f"🏆 {uname} 达成成就「{name}」！"
+
+    def _settle_guess_verse_achievements(self, engine, winner_uid, winner_name):
+        """猜诗句猜中后结算所有参与者成就。返回提示消息列表。"""
+        msgs = []
+        participants = getattr(engine, "participants", set())
+        user_guesses = getattr(engine, "user_guesses", {})
+        n = len(participants)
+        total = len(engine.history)
+
+        for p_uid in participants:
+            p_name = self._uid_name(p_uid)
+            pm = self.pm
+            # 参与人数成就
+            counts = {1: "solo_pass", 2: "double_pass", 3: "triple_pass",
+                      4: "four_scholar", 5: "five_poem"}
+            if n in counts:
+                if pm.unlock_achievement(p_uid, counts[n], p_name):
+                    msgs.append(self._achieve_msg(p_uid, counts[n]))
+            # 极简主义
+            if total <= 10:
+                if pm.unlock_achievement(p_uid, "minimalist", p_name):
+                    msgs.append(self._achieve_msg(p_uid, "minimalist"))
+            # 时段成就
+            h = time.localtime().tm_hour
+            if h >= 23 or h < 5:
+                if pm.unlock_achievement(p_uid, "night_owl", p_name):
+                    msgs.append(self._achieve_msg(p_uid, "night_owl"))
+            elif 5 <= h < 8:
+                if pm.unlock_achievement(p_uid, "early_bird", p_name):
+                    msgs.append(self._achieve_msg(p_uid, "early_bird"))
+            # 坚持不懈（单局个人≥20次，无论是否猜中）
+            if user_guesses.get(p_uid, 0) >= 20:
+                if pm.unlock_achievement(p_uid, "persistent", p_name):
+                    msgs.append(self._achieve_msg(p_uid, "persistent"))
+            # 参与局数
+            pm.inc_stat(p_uid, "guess_games", 1, p_name)
+            # 个人诗句/字数成就
+            for a in pm.check_verse_achievements(p_uid, p_name):
+                msgs.append(self._achieve_msg(p_uid, a))
+            # 赢家统计
+            if p_uid == winner_uid:
+                pm.inc_stat(p_uid, "guess_wins", 1, p_name)
+                if user_guesses.get(p_uid, 0) == 1:
+                    if pm.unlock_achievement(p_uid, "first_hit", p_name):
+                        msgs.append(self._achieve_msg(p_uid, "first_hit"))
+                # 收尾人计数
+                st = pm.load(p_uid).get("stats", {})
+                cc = st.get("closer_count", 0) + 1
+                st["closer_count"] = cc
+                pm.save(p_uid)
+                for a in pm.check_closer(p_uid, cc, p_name):
+                    msgs.append(self._achieve_msg(p_uid, a))
+        return msgs
+
+    def _settle_duel_achievements(self, duel, engine, winner_side, winner_uid):
+        """对垒分出胜负后结算成就。返回提示消息列表。"""
+        msgs = []
+        a_id, b_id = engine.a_id, engine.b_id
+        loser_id = b_id if winner_side == "a" else a_id
+        gc = duel.get("guess_counts", {})
+        win_guesses = gc.get(str(winner_uid), 0)
+
+        # 胜者统计 + 成就
+        self.pm.inc_stat(winner_uid, "duel_wins", 1, self._uid_name(winner_uid))
+        self.pm.inc_stat(a_id, "duel_games", 1, self._uid_name(a_id))
+        self.pm.inc_stat(b_id, "duel_games", 1, self._uid_name(b_id))
+        # 时段成就
+        h = time.localtime().tm_hour
+        for p in (a_id, b_id):
+            ach = None
+            if h >= 23 or h < 5:
+                ach = "night_owl"
+            elif 5 <= h < 8:
+                ach = "early_bird"
+            if ach and self.pm.unlock_achievement(p, ach, self._uid_name(p)):
+                msgs.append(self._achieve_msg(p, ach))
+        # 速通 / 开了！
+        if win_guesses <= 10:
+            if self.pm.unlock_achievement(winner_uid, "duel_speed", self._uid_name(winner_uid)):
+                msgs.append(self._achieve_msg(winner_uid, "duel_speed"))
+        if win_guesses <= 5:
+            if self.pm.unlock_achievement(winner_uid, "duel_open", self._uid_name(winner_uid)):
+                msgs.append(self._achieve_msg(winner_uid, "duel_open"))
+        # 先手/后手
+        if winner_side == "a" and self.pm.unlock_achievement(a_id, "first_mover", self._uid_name(a_id)):
+            msgs.append(self._achieve_msg(a_id, "first_mover"))
+        elif winner_side == "b" and self.pm.unlock_achievement(b_id, "second_mover", self._uid_name(b_id)):
+            msgs.append(self._achieve_msg(b_id, "second_mover"))
+        # 复仇者：上局输给 loser_id，本局作为 winner_uid 赢回
+        prev = self.pm.load(winner_uid).get("stats", {}).get("last_duel_lost_to")
+        if prev == loser_id:
+            if self.pm.unlock_achievement(winner_uid, "avenger", self._uid_name(winner_uid)):
+                msgs.append(self._achieve_msg(winner_uid, "avenger"))
+        # 记录输家输给谁（供下局复仇判定）
+        self.pm.load(loser_id).setdefault("stats", {})["last_duel_lost_to"] = winner_uid
+        self.pm.save(loser_id)
+        return msgs
+
+    def _check_soulmate(self, duel, a_id, b_id):
+        """心有灵犀：双方所出诗句是否出自同一首诗词。返回提示消息列表。"""
+        msgs = []
+        a_puzzle = duel.get("puzzles", {}).get(a_id, "")
+        b_puzzle = duel.get("puzzles", {}).get(b_id, "")
+        if not self.db or not a_puzzle or not b_puzzle:
+            return msgs
+        try:
+            a_titles = set(self._poem_titles_of(a_puzzle))
+            b_titles = set(self._poem_titles_of(b_puzzle))
+            if a_titles & b_titles:
+                for p in (a_id, b_id):
+                    if self.pm.unlock_achievement(p, "soulmate", self._uid_name(p)):
+                        msgs.append(self._achieve_msg(p, "soulmate"))
+        except Exception:
+            pass
+        return msgs
+
+    def _poem_titles_of(self, text):
+        """返回包含该诗句（分句）的所有诗词标题。"""
+        titles = []
+        if not self.db:
+            return titles
+        clauses = re.split(r'[，。！？、；：]', text)
+        clauses = [re.sub(r'[^\u4e00-\u9fff]', '', c) for c in clauses if re.sub(r'[^\u4e00-\u9fff]', '', c)]
+        if not clauses:
+            return titles
+        import sqlite3
+        try:
+            conn = sqlite3.connect(self.db.db_path)
+            cur = conn.cursor()
+            cur.execute("SELECT title FROM poems WHERE content LIKE ? LIMIT 50", (f'%{clauses[0]}%',))
+            titles = [r[0] for r in cur.fetchall()]
+            conn.close()
+        except Exception:
+            pass
+        return titles
+
     # ==========================================
     # 全局监听分发中枢
     # ==========================================
@@ -1389,6 +1606,8 @@ class PoetryPlugin(Star):
                         f"「{clean}」不在经典诗词库中，请输入完整的半句诗句进行猜测。"
                     )
                     return
+                # 记录猜测诗句到个人数据
+                self.pm.record_verse(uid, clean, event.get_sender_name() or f"用户{uid}")
                 ok, err, side, comp, all_correct = engine.guess(uid, msg_raw)
                 if not ok:
                     yield event.plain_result(err)
@@ -1444,6 +1663,20 @@ class PoetryPlugin(Star):
                 if not self._is_in_library(clean):
                     yield event.plain_result(f"「{clean}」不在诗词库中，请输入曲库诗句。")
                     return
+            uid = str(event.get_sender_id())
+            uname = event.get_sender_name() or f"用户{uid}"
+            # 记录参与者与单局个人猜测次数
+            if not hasattr(engine, "participants"):
+                engine.participants = set()
+                engine.user_guesses = {}
+            engine.participants.add(uid)
+            engine.user_guesses[uid] = engine.user_guesses.get(uid, 0) + 1
+            # 记录诗句到个人数据
+            self.pm.record_verse(uid, clean, uname)
+            self.pm.inc_stat(uid, "total_guesses", 1, uname)
+            # 检查个人/特殊成就
+            for a in self.pm.check_verse_achievements(uid, uname):
+                yield event.plain_result(f"🏆 {uname} 达成成就「{ACHIEVEMENTS.get(a, (a,''))[0]}」！")
             ok, err, comp, all_correct = engine.guess(clean)
             if not ok:
                 # 不合规的猜测静默忽略，不回复，不占次数
@@ -1457,6 +1690,9 @@ class PoetryPlugin(Star):
                 render_answer(engine, ans_path)
                 yield event.image_result(ans_path)
                 yield event.plain_result(f"🎉 猜中了！{engine.target_text}")
+                # ===== 猜诗句成就结算 =====
+                for msg in self._settle_guess_verse_achievements(engine, uid, uname):
+                    yield event.plain_result(msg)
                 del self.guess_verse_sessions[session_id]
                 if os.path.exists(img_path): os.remove(img_path)
             elif engine.is_finished():

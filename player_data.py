@@ -1,0 +1,220 @@
+# -*- coding: utf-8 -*-
+"""玩家个人数据 + 成就系统。
+
+- 每个参与诗词游戏的玩家在 plugin_data_dir/players/{uid}.json 维护个人数据
+- 记录玩家使用过的所有诗句（拆成单句存储，去重计数）
+- 记录玩家达成的所有成就及未完成进度
+"""
+
+import json
+import os
+import time
+
+# ============ 成就定义 ============
+# 结构: {id: (名称, 描述)}
+ACHIEVEMENTS = {
+    # 猜诗词 · 参与人数
+    "solo_pass": ("单通！", "成功完成一次猜诗词，且本局只有一人参与"),
+    "double_pass": ("双人成行", "成功完成一次猜诗词，且本局有且只有两人参与"),
+    "triple_pass": ("三人行", "成功完成一次猜诗词，且本局有且只有三人参与"),
+    "four_scholar": ("四大才子", "成功完成一次猜诗词，且本局有且只有四人参与"),
+    "five_poem": ("我们的诗词!!!!!", "成功完成一次猜诗词，且本局有且只有五人参与"),
+    # 猜诗词 · 效率
+    "minimalist": ("极简主义", "十次以内成功完成一次猜诗词"),
+    "first_hit": ("一发入魂", "第一次猜测即猜中"),
+    "persistent": ("坚持不懈", "单局内个人累计发送 20 句仍未猜中"),
+    "closer_1": ("一阶收尾人", "作为本局最终猜中者 1 次"),
+    "closer_3": ("二阶收尾人", "作为本局最终猜中者 3 次"),
+    "closer_5": ("三阶收尾人", "作为本局最终猜中者 5 次"),
+    "closer_7": ("四阶收尾人", "作为本局最终猜中者 7 次"),
+    "closer_10": ("色彩收尾人", "作为本局最终猜中者 10 次"),
+    # 诗词对垒
+    "duel_speed": ("速通", "十次内猜出对方诗句并获胜"),
+    "duel_open": ("开了！", "五次内猜出对方诗句并获胜"),
+    "soulmate": ("心有灵犀", "双方所出诗句为同一首诗词内的诗句"),
+    "first_mover": ("先手必胜", "作为挑战者在对垒中获胜"),
+    "second_mover": ("后发制人", "作为被挑战者在对垒中获胜"),
+    "avenger": ("复仇者", "对垒输给某人后，下一局赢回"),
+    "too_dark": ("太阴了！", "对垒中双方各累计 20 次猜测仍未分出胜负"),
+    # 个人积累
+    "poet_100": ("小诗仙", "个人诗词数据达到 100 句"),
+    "poet_1000": ("诗仙", "个人诗词数据达到 1000 句"),
+    # 特殊
+    "night_owl": ("夜猫子", "在 23:00-5:00 期间完成一局诗词游戏"),
+    "early_bird": ("早鸟", "在 5:00-8:00 期间完成一局诗词游戏"),
+    "five_word": ("五言专家", "个人诗句库中 5 字单句累计 100 条"),
+    "seven_word": ("七言高手", "个人诗句库中 7 字单句累计 100 条"),
+}
+
+# 分阶成就顺序（同系成就按阈值判断）
+CLOSER_ACHIEVEMENTS = ["closer_1", "closer_3", "closer_5", "closer_7", "closer_10"]
+CLOSER_THRESHOLDS = [1, 3, 5, 7, 10]
+
+
+class PlayerManager:
+    """管理所有玩家的个人数据文件。"""
+
+    def __init__(self, data_dir):
+        self.data_dir = data_dir
+        os.makedirs(data_dir, exist_ok=True)
+        self.players = {}  # uid -> dict
+
+    def _path(self, uid):
+        return os.path.join(self.data_dir, f"{uid}.json")
+
+    def load(self, uid, name=""):
+        """加载玩家数据，不存在则创建。返回玩家数据 dict。"""
+        uid = str(uid)
+        if uid in self.players:
+            p = self.players[uid]
+            if name and p.get("name") != name:
+                p["name"] = name
+            return p
+        path = self._path(uid)
+        p = None
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    p = json.load(f)
+            except Exception:
+                p = None
+        if not p or not isinstance(p, dict):
+            now = time.time()
+            p = {
+                "uid": uid,
+                "name": name or f"用户{uid}",
+                "first_seen": now,
+                "last_active": now,
+                "verses": {},       # 单句 -> {first, count}
+                "achievements": {},  # 成就id -> {unlocked, time, progress}
+                "stats": {
+                    "guess_games": 0,
+                    "guess_wins": 0,
+                    "duel_games": 0,
+                    "duel_wins": 0,
+                    "total_guesses": 0,
+                },
+            }
+        self.players[uid] = p
+        return p
+
+    def save(self, uid):
+        """立即写盘指定玩家。"""
+        p = self.players.get(str(uid))
+        if not p:
+            return
+        p["last_active"] = time.time()
+        path = self._path(uid)
+        try:
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(p, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, path)
+        except Exception:
+            pass
+
+    def record_verse(self, uid, text, name=""):
+        """记录玩家使用过的一句诗（拆成单句）。返回新记录的单句数量。"""
+        p = self.load(uid, name)
+        added = 0
+        for clause in _split_single_clauses(text):
+            if not clause:
+                continue
+            if clause in p["verses"]:
+                p["verses"][clause]["count"] += 1
+            else:
+                p["verses"][clause] = {"first": time.time(), "count": 1}
+                added += 1
+        self.save(uid)
+        return added
+
+    def inc_stat(self, uid, key, amount=1, name=""):
+        """累加统计字段。"""
+        p = self.load(uid, name)
+        p["stats"][key] = p["stats"].get(key, 0) + amount
+        self.save(uid)
+
+    def verse_count(self, uid):
+        """返回玩家诗句条数。"""
+        p = self.load(uid)
+        return len(p["verses"])
+
+    def check_verse_achievements(self, uid, name=""):
+        """检查个人积累/特殊类成就（诗句数、字数、时段）。返回新解锁成就 id 列表。"""
+        p = self.load(uid, name)
+        verses = p["verses"]
+        total = len(verses)
+        five = sum(1 for v in verses if len(v) == 5)
+        seven = sum(1 for v in verses if len(v) == 7)
+        now = time.localtime()
+        hour = now.tm_hour
+        is_night = hour >= 23 or hour < 5
+        is_early = 5 <= hour < 8
+
+        checks = {
+            "poet_100": total >= 100,
+            "poet_1000": total >= 1000,
+            "five_word": five >= 100,
+            "seven_word": seven >= 100,
+        }
+        # 时段成就：仅在完成一局时由外部触发时段标记，这里不做时段检查（避免误判）
+        return self._unlock(uid, checks)
+
+    def unlock_achievement(self, uid, ach_id, name=""):
+        """直接解锁指定成就。返回是否新解锁。"""
+        p = self.load(uid, name)
+        if p["achievements"].get(ach_id, {}).get("unlocked"):
+            return False
+        p["achievements"][ach_id] = {"unlocked": True, "time": time.time()}
+        self.save(uid)
+        return True
+
+    def set_progress(self, uid, ach_id, progress, name=""):
+        """更新成就进度（不锁定）。"""
+        p = self.load(uid, name)
+        cur = p["achievements"].get(ach_id, {})
+        if cur.get("unlocked"):
+            return False
+        if progress > cur.get("progress", 0):
+            p["achievements"][ach_id] = {"unlocked": False, "progress": progress}
+            self.save(uid)
+        return False
+
+    def _unlock(self, uid, checks, name=""):
+        """批量检查成就条件，解锁满足的。返回新解锁列表。"""
+        p = self.load(uid, name)
+        new = []
+        for ach_id, ok in checks.items():
+            if not ok:
+                continue
+            cur = p["achievements"].get(ach_id, {})
+            if not cur.get("unlocked"):
+                p["achievements"][ach_id] = {"unlocked": True, "time": time.time()}
+                new.append(ach_id)
+        if new:
+            self.save(uid)
+        return new
+
+    def check_closer(self, uid, closer_count, name=""):
+        """检查收尾人分阶成就。closer_count 为累计收尾次数。返回新解锁列表。"""
+        new = []
+        for cid, thr in zip(CLOSER_ACHIEVEMENTS, CLOSER_THRESHOLDS):
+            if closer_count >= thr:
+                if self.unlock_achievement(uid, cid, name):
+                    new.append(cid)
+        return new
+
+    def get_achievements(self, uid):
+        """返回玩家成就字典（含进度）。"""
+        return self.load(uid).get("achievements", {})
+
+    def get_verses(self, uid):
+        """返回玩家诗句字典。"""
+        return self.load(uid).get("verses", {})
+
+
+def _split_single_clauses(text):
+    """将含标点的诗句拆成单个分句（去标点），两句则拆两个单句。"""
+    import re
+    clauses = re.split(r'[，。！？、；：\s]+', text or "")
+    return [re.sub(r'[^\u4e00-\u9fff]', '', c) for c in clauses if re.sub(r'[^\u4e00-\u9fff]', '', c)]

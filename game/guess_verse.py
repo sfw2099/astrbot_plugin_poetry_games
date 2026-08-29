@@ -879,6 +879,41 @@ def render_answer(engine, output_path):
     img.save(output_path, "PNG")
     return output_path
 
+
+def render_verse_list(uid, uname, verses, output_path):
+    """渲染玩家积累诗句列表图。"""
+    pad = 30
+    title_h = 70
+    row_h = 34
+    item_font = _get_font(20)
+    title_font = _get_font(26)
+    col_gap = 18
+    per_row = 5
+
+    sorted_items = sorted(verses.items(), key=lambda kv: kv[1].get("first", 0))
+    items = [v for v, _ in sorted_items]
+    total = len(items)
+    rows = (total + per_row - 1) // per_row if total else 1
+
+    cell_w = 150
+    img_w = pad * 2 + per_row * cell_w + (per_row - 1) * col_gap
+    img_h = pad + title_h + rows * (row_h + 4) + pad
+
+    img = Image.new("RGB", (img_w, img_h), (250, 250, 252))
+    draw = ImageDraw.Draw(img)
+
+    draw.text((img_w // 2, 20), f"📚 {uname} 的诗词积累（{total} 句）", fill=(40, 40, 40), font=title_font, anchor="mt")
+
+    y = pad + title_h
+    for idx, v in enumerate(items):
+        col = idx % per_row
+        row = idx // per_row
+        x = pad + col * (cell_w + col_gap)
+        cy = y + row * (row_h + 4)
+        draw.rounded_rectangle([x, cy, x + cell_w, cy + row_h], radius=6, fill=(255, 255, 255),
+                               outline=(200, 200, 205), width=1)
+        draw.text((x + cell_w // 2, cy + row_h // 2), v, fill=(50, 50, 50), font=item_font, anchor="mm")
+
     img.save(output_path, "PNG")
     return output_path
 
