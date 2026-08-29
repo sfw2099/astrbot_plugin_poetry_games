@@ -19,6 +19,7 @@ from .game.guess_verse import GuessVerseEngine, render_grid, render_blank, rende
 from .game.guess_verse import pick_battle_target, BattleVerseEngine, render_battle
 from .game.guess_verse import DuelVerseEngine, render_duel, pick_puzzle_verse
 from .game.guess_verse import extract_hanzi, extract_punct
+from .game.guess_verse import INITIALS_LIST, FINALS_LIST
 from .player_data import PlayerManager, ACHIEVEMENTS
 
 GITEE_BASE = "https://gitee.com/alin1031/poetry-data/releases/download/v1.0.0/poetry_data.zip"
@@ -529,18 +530,17 @@ class PoetryPlugin(Star):
             lines.append("  （暂无成就，快去玩游戏吧！）")
         for k, v in unlocked.items():
             name = ACHIEVEMENTS.get(k, (k, ""))[0]
-            desc = ACHIEVEMENTS.get(k, (k, ""))[1]
             if k == "closer":
                 # 收尾人显示当前等级
                 from .player_data import closer_level_name
                 name = closer_level_name(v.get("progress", 0))
-                lines.append(f"✅ {name} —— 累计 {v.get('progress', 0)} 次")
+                lines.append(f"✅ {name}（累计 {v.get('progress', 0)} 次）")
             elif k == "pig":
                 # 🐖 显示对应数量的🐖
                 count = v.get("progress", 0)
                 lines.append(f"✅ {name} x{count} —— {'🐖' * count}")
             else:
-                lines.append(f"✅ {name} —— {desc}")
+                lines.append(f"✅ {name}")
         # 未解锁但有进度
         progress_items = []
         for k, v in achs.items():
@@ -1102,6 +1102,37 @@ class PoetryPlugin(Star):
             if "guess_counts" not in duel:
                 duel["guess_counts"] = {}
             duel["guess_counts"][uid] = duel["guess_counts"].get(uid, 0) + 1
+            # 追踪本局声母/韵母使用（供 于无声处听惊雷 / 绕梁余韵）
+            if "user_initials" not in duel:
+                duel["user_initials"] = {}
+                duel["user_finals"] = {}
+            duel["user_initials"].setdefault(uid, set())
+            duel["user_finals"].setdefault(uid, set())
+            side_parts = []
+            if side == "a" and engine.a_history:
+                side_parts = engine.a_history[-1][1]
+            elif side == "b" and engine.b_history:
+                side_parts = engine.b_history[-1][1]
+            for gp in side_parts:
+                if gp.get("initial"):
+                    duel["user_initials"][uid].add(gp["initial"])
+                if gp.get("final"):
+                    duel["user_finals"][uid].add(gp["final"])
+            # 一事无成：一次猜测每个字全灰
+            if comp and all(c is not None and c.get("char") == "absent" for c in comp):
+                if self.pm.unlock_achievement(uid, "all_gray", event.get_sender_name() or f"用户{uid}"):
+                    yield event.plain_result(self._achieve_msg(uid, "all_gray"))
+            # 旗开得胜：首次猜测出现存在的字或完全正确的拼音
+            if duel["guess_counts"].get(uid, 0) == 1:
+                has_char = any(c is not None and c.get("char") in ("correct", "present") for c in comp)
+                has_pinyin = any(
+                    c is not None and c.get("initial") == "correct"
+                    and c.get("final") == "correct" and c.get("tone") == "correct"
+                    for c in comp
+                )
+                if has_char or has_pinyin:
+                    if self.pm.unlock_achievement(uid, "first_hit_char", event.get_sender_name() or f"用户{uid}"):
+                        yield event.plain_result(self._achieve_msg(uid, "first_hit_char"))
             img_path = os.path.join(str(self.plugin_data_dir), f"duel_{sid}.png")
             render_duel(engine, img_path, hint_mode=duel.get("hint_mode", "pinyin"))
             _block_llm()
@@ -1448,6 +1479,19 @@ class PoetryPlugin(Star):
             if user_guesses.get(p_uid, 0) >= 20:
                 if pm.unlock_achievement(p_uid, "persistent", p_name):
                     msgs.append(self._achieve_msg(p_uid, "persistent"))
+            # 于无声处听惊雷 / 绕梁余韵：本局使用全部声母/韵母
+            user_initials = getattr(engine, "user_initials", {}).get(p_uid, set())
+            user_finals = getattr(engine, "user_finals", {}).get(p_uid, set())
+            if user_initials >= set(INITIALS_LIST):
+                if pm.unlock_achievement(p_uid, "all_initials", p_name):
+                    msgs.append(self._achieve_msg(p_uid, "all_initials"))
+            if user_finals >= set(FINALS_LIST):
+                if pm.unlock_achievement(p_uid, "all_finals", p_name):
+                    msgs.append(self._achieve_msg(p_uid, "all_finals"))
+            # 怀民亦未寝：多人夜间完成
+            if n >= 2 and (h >= 23 or h < 5):
+                if pm.unlock_achievement(p_uid, "night_group", p_name):
+                    msgs.append(self._achieve_msg(p_uid, "night_group"))
             # 参与局数
             pm.inc_stat(p_uid, "guess_games", 1, p_name)
             # 个人诗句/字数成就
@@ -1491,6 +1535,21 @@ class PoetryPlugin(Star):
                 ach = "early_bird"
             if ach and self.pm.unlock_achievement(p, ach, self._uid_name(p)):
                 msgs.append(self._achieve_msg(p, ach))
+        # 怀民亦未寝：夜间对垒完成（双人）
+        if h >= 23 or h < 5:
+            for p in (a_id, b_id):
+                if self.pm.unlock_achievement(p, "night_group", self._uid_name(p)):
+                    msgs.append(self._achieve_msg(p, "night_group"))
+        # 于无声处听惊雷 / 绕梁余韵：获胜方本局使用全部声母/韵母
+        win_name = self._uid_name(winner_uid)
+        win_initials = duel.get("user_initials", {}).get(winner_uid, set())
+        win_finals = duel.get("user_finals", {}).get(winner_uid, set())
+        if win_initials >= set(INITIALS_LIST):
+            if self.pm.unlock_achievement(winner_uid, "all_initials", win_name):
+                msgs.append(self._achieve_msg(winner_uid, "all_initials"))
+        if win_finals >= set(FINALS_LIST):
+            if self.pm.unlock_achievement(winner_uid, "all_finals", win_name):
+                msgs.append(self._achieve_msg(winner_uid, "all_finals"))
         # 速通 / 开了！
         if win_guesses <= 10:
             if self.pm.unlock_achievement(winner_uid, "duel_speed", self._uid_name(winner_uid)):
@@ -1692,6 +1751,8 @@ class PoetryPlugin(Star):
                 engine.participants = set()
                 engine.user_guesses = {}
                 engine.user_verses = {}
+                engine.user_initials = {}
+                engine.user_finals = {}
             engine.participants.add(uid)
             engine.user_guesses[uid] = engine.user_guesses.get(uid, 0) + 1
             # 🐖 重复诗句检测（本局内自己发过的纯汉字）
@@ -1711,6 +1772,30 @@ class PoetryPlugin(Star):
             if not ok:
                 # 不合规的猜测静默忽略，不回复，不占次数
                 return
+            # 追踪本局声母/韵母使用（供 于无声处听惊雷 / 绕梁余韵）
+            engine.user_initials.setdefault(uid, set())
+            engine.user_finals.setdefault(uid, set())
+            guess_parts = engine.history[-1][1] if engine.history else []
+            for gp in guess_parts:
+                if gp.get("initial"):
+                    engine.user_initials[uid].add(gp["initial"])
+                if gp.get("final"):
+                    engine.user_finals[uid].add(gp["final"])
+            # 一事无成：一次猜测每个字全灰
+            if comp and all(c is not None and c.get("char") == "absent" for c in comp):
+                if self.pm.unlock_achievement(uid, "all_gray", uname):
+                    yield event.plain_result(self._achieve_msg(uid, "all_gray"))
+            # 旗开得胜：首次猜测出现存在的字或完全正确的拼音
+            if engine.user_guesses.get(uid, 0) == 1:
+                has_char = any(c is not None and c.get("char") in ("correct", "present") for c in comp)
+                has_pinyin = any(
+                    c is not None and c.get("initial") == "correct"
+                    and c.get("final") == "correct" and c.get("tone") == "correct"
+                    for c in comp
+                )
+                if has_char or has_pinyin:
+                    if self.pm.unlock_achievement(uid, "first_hit_char", uname):
+                        yield event.plain_result(self._achieve_msg(uid, "first_hit_char"))
             img_path = os.path.join(str(self.plugin_data_dir), f"verse_{session_id}.png")
             render_grid(engine, img_path, max_attempts=None, hint_mode=engine.hint_mode)
             yield event.image_result(img_path)
