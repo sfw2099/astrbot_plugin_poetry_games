@@ -1401,6 +1401,8 @@ class PoetryPlugin(Star):
         user_guesses = getattr(engine, "user_guesses", {})
         n = len(participants)
         total = len(engine.history)
+        # 日志：本局参与人数与参与者，便于排查成就触发
+        logger.info(f"[成就] 猜诗句结算：本局参与 {n} 人 → {sorted(participants)}")
 
         for p_uid in participants:
             p_name = self._uid_name(p_uid)
@@ -1689,7 +1691,8 @@ class PoetryPlugin(Star):
                 ans_path = os.path.join(str(self.plugin_data_dir), f"verse_ans_{session_id}.png")
                 render_answer(engine, ans_path)
                 yield event.image_result(ans_path)
-                yield event.plain_result(f"🎉 猜中了！{engine.target_text}")
+                n_participants = len(getattr(engine, "participants", set()))
+                yield event.plain_result(f"🎉 猜中了！{engine.target_text}\n（本局参与 {n_participants} 人）")
                 # ===== 猜诗句成就结算 =====
                 for msg in self._settle_guess_verse_achievements(engine, uid, uname):
                     yield event.plain_result(msg)
