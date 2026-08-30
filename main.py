@@ -1127,12 +1127,12 @@ class PoetryPlugin(Star):
             ):
                 if self.pm.unlock_achievement(uid, "all_gray", event.get_sender_name() or f"用户{uid}"):
                     yield event.plain_result(self._achieve_msg(uid, "all_gray"))
-            # 旗开得胜：首次猜测出现存在的字或完全正确的拼音
-            if duel["guess_counts"].get(uid, 0) == 1:
+            # 旗开得胜：开局首句（本局第1条合法猜测），出现存在的字或完整拼音
+            if len(engine.a_history) + len(engine.b_history) == 1:
                 has_char = any(c is not None and c.get("char") in ("correct", "present") for c in comp)
                 has_pinyin = any(
-                    c is not None and c.get("initial") == "correct"
-                    and c.get("final") == "correct" and c.get("tone") == "correct"
+                    c is not None and c.get("initial") in ("correct", "present")
+                    and c.get("final") in ("correct", "present")
                     for c in comp
                 )
                 if has_char or has_pinyin:
@@ -1508,6 +1508,10 @@ class PoetryPlugin(Star):
                 if user_guesses.get(p_uid, 0) == 1:
                     if pm.unlock_achievement(p_uid, "first_hit", p_name):
                         msgs.append(self._achieve_msg(p_uid, "first_hit"))
+                # 摘桃子：多人在场时本局仅发送一句即猜中
+                if n >= 2 and user_guesses.get(p_uid, 0) == 1:
+                    if pm.unlock_achievement(p_uid, "peach_picker", p_name):
+                        msgs.append(self._achieve_msg(p_uid, "peach_picker"))
                 # 收尾人计数（升级制）
                 st = pm.load(p_uid).get("stats", {})
                 cc = st.get("closer_count", 0) + 1
@@ -1755,18 +1759,17 @@ class PoetryPlugin(Star):
             if not hasattr(engine, "participants"):
                 engine.participants = set()
                 engine.user_guesses = {}
-                engine.user_verses = {}
+                engine.user_verses = set()
                 engine.user_initials = {}
                 engine.user_finals = {}
             engine.participants.add(uid)
             engine.user_guesses[uid] = engine.user_guesses.get(uid, 0) + 1
-            # 🐖 重复诗句检测（本局内自己发过的纯汉字）
-            engine.user_verses.setdefault(uid, set())
-            if hanzi in engine.user_verses[uid]:
+            # 🐖 重复诗句检测（本局内任意玩家发过即算重复）
+            if hanzi in engine.user_verses:
                 pig_count = self.pm.add_pig(uid, uname)
                 yield event.plain_result(f"🐖 {uname} 重复诗句！猪+1（{'🐖' * pig_count}）")
             else:
-                engine.user_verses[uid].add(hanzi)
+                engine.user_verses.add(hanzi)
             # 记录诗句到个人数据
             self.pm.record_verse(uid, clean, uname)
             self.pm.inc_stat(uid, "total_guesses", 1, uname)
@@ -1794,12 +1797,12 @@ class PoetryPlugin(Star):
             ):
                 if self.pm.unlock_achievement(uid, "all_gray", uname):
                     yield event.plain_result(self._achieve_msg(uid, "all_gray"))
-            # 旗开得胜：首次猜测出现存在的字或完全正确的拼音
-            if engine.user_guesses.get(uid, 0) == 1:
+            # 旗开得胜：开局首句（本局第1条合法猜测），出现存在的字或完整拼音
+            if len(engine.history) == 1:
                 has_char = any(c is not None and c.get("char") in ("correct", "present") for c in comp)
                 has_pinyin = any(
-                    c is not None and c.get("initial") == "correct"
-                    and c.get("final") == "correct" and c.get("tone") == "correct"
+                    c is not None and c.get("initial") in ("correct", "present")
+                    and c.get("final") in ("correct", "present")
                     for c in comp
                 )
                 if has_char or has_pinyin:
