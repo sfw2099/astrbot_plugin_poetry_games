@@ -1481,7 +1481,8 @@ class PoetryPlugin(Star):
             # 赢家统计
             if p_uid == winner_uid:
                 pm.inc_stat(p_uid, "guess_wins", 1, p_name)
-                if user_guesses.get(p_uid, 0) == 1:
+                # 一发入魂：开局首句（本局第1条合法猜测）即猜中
+                if total == 1:
                     if pm.unlock_achievement(p_uid, "first_hit", p_name):
                         msgs.append(self._achieve_msg(p_uid, "first_hit"))
                 # 摘桃子：多人在场时本局仅发送一句即猜中
