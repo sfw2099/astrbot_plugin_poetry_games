@@ -1594,7 +1594,7 @@ def render_achievements(uid, uname, achs, output_path):
     img = Image.new("RGB", (img_w, img_h), (250, 250, 252))
     draw = ImageDraw.Draw(img)
 
-    draw.text((img_w // 2, 20), f"🏅 {uname} 的成就（{total}/{len(ACHIEVEMENTS)}）", fill=(40, 40, 40), font=title_font, anchor="mt")
+    draw.text((img_w // 2, 20), f"[成就] {uname}（{total}/{len(ACHIEVEMENTS)}）", fill=(40, 40, 40), font=title_font, anchor="mt")
 
     y = pad + title_h
     if not unlocked:
@@ -1608,14 +1608,14 @@ def render_achievements(uid, uname, achs, output_path):
             name = closer_level_name(v.get("progress", 0))
             desc = f"累计 {v.get('progress', 0)} 次"
         elif k == "pig":
-            name = f"{name} x{v.get('progress', 0)}"
-            desc = "🐖" * v.get("progress", 0)
+            name = f"猪 x{v.get('progress', 0)}"
+            desc = "猪" * v.get("progress", 0)
         elif k == "duel_streak":
             name = duel_streak_name(v.get("progress", 0))
             desc = f"最高 {v.get('progress', 0)} 连"
         draw.rounded_rectangle([pad, y, img_w - pad, y + row_h], radius=8, fill=(255, 255, 255),
                                outline=(200, 200, 205), width=1)
-        draw.text((pad + 14, y + row_h // 2), f"✅ {name}", fill=(40, 40, 40), font=item_font, anchor="lm")
+        draw.text((pad + 14, y + row_h // 2), f"[已解锁] {name}", fill=(40, 40, 40), font=item_font, anchor="lm")
         draw.text((img_w - pad - 14, y + row_h // 2), desc, fill=(120, 120, 125), font=small_font, anchor="rm")
         y += row_h + 6
     if progress_items:
@@ -1630,7 +1630,7 @@ def render_achievements(uid, uname, achs, output_path):
                 desc = f"最高 {v.get('progress', 0)} 连"
             draw.rounded_rectangle([pad, y, img_w - pad, y + row_h], radius=8, fill=(248, 248, 250),
                                    outline=(220, 220, 225), width=1)
-            draw.text((pad + 14, y + row_h // 2), f"⏳ {name}", fill=(120, 120, 125), font=item_font, anchor="lm")
+            draw.text((pad + 14, y + row_h // 2), f"[进行中] {name}", fill=(120, 120, 125), font=item_font, anchor="lm")
             draw.text((img_w - pad - 14, y + row_h // 2), desc, fill=(160, 160, 165), font=small_font, anchor="rm")
             y += row_h + 6
 

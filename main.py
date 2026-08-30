@@ -1489,15 +1489,14 @@ class PoetryPlugin(Star):
                 if n >= 2 and user_guesses.get(p_uid, 0) == 1:
                     if pm.unlock_achievement(p_uid, "peach_picker", p_name):
                         msgs.append(self._achieve_msg(p_uid, "peach_picker"))
-                # 收尾人计数（升级制）
-                st = pm.load(p_uid).get("stats", {})
-                cc = st.get("closer_count", 0) + 1
-                st["closer_count"] = cc
-                pm.save(p_uid)
+                # 收尾人计数（升级制，从成就 progress 累计）
+                ach_closer = pm.get_achievements(p_uid).get("closer", {})
+                cc = ach_closer.get("progress", 0) + 1
                 new_lv = pm.check_closer(p_uid, cc, p_name)
                 if new_lv:
                     msgs.append(f"🏆 {p_name} 达成成就「{new_lv}」！")
                 # 神机妙算：猜诗句累计获胜 10 场
+                st = pm.load(p_uid).get("stats", {})
                 if st.get("guess_wins", 0) >= 10:
                     if pm.unlock_achievement(p_uid, "guess_win_10", p_name):
                         msgs.append(self._achieve_msg(p_uid, "guess_win_10"))

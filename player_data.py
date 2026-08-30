@@ -163,7 +163,7 @@ class PlayerManager:
         return p
 
     def _migrate(self, p):
-        """迁移旧数据：清空旧版分阶收尾人成就与 closer_count，从 0 重计。返回是否有改动。"""
+        """迁移旧数据：清空旧版分阶收尾人成就 id，从 0 重计。返回是否有改动。"""
         changed = False
         ach = p.get("achievements")
         if isinstance(ach, dict):
@@ -171,10 +171,6 @@ class PlayerManager:
                 if old in ach:
                     del ach[old]
                     changed = True
-        st = p.get("stats")
-        if isinstance(st, dict) and st.get("closer_count"):
-            st["closer_count"] = 0
-            changed = True
         return changed
 
     def save(self, uid):
