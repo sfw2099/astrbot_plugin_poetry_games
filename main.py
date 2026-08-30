@@ -520,39 +520,14 @@ class PoetryPlugin(Star):
 
     @filter.command("我的成就")
     async def my_achievements(self, event: AstrMessageEvent):
-        """查看已解锁成就及进度。"""
+        """查看已解锁成就及进度（图片渲染）。"""
         uid = str(event.get_sender_id())
         uname = event.get_sender_name() or f"用户{uid}"
         achs = self.pm.get_achievements(uid)
-        unlocked = {k: v for k, v in achs.items() if v.get("unlocked")}
-        lines = [f"🏅 {uname} 的成就（{len(unlocked)}/{len(ACHIEVEMENTS)}）："]
-        if not unlocked:
-            lines.append("  （暂无成就，快去玩游戏吧！）")
-        for k, v in unlocked.items():
-            name = ACHIEVEMENTS.get(k, (k, ""))[0]
-            desc = ACHIEVEMENTS.get(k, (k, ""))[1]
-            if k == "closer":
-                # 收尾人显示当前等级
-                from .player_data import closer_level_name
-                name = closer_level_name(v.get("progress", 0))
-                lines.append(f"✅ {name} —— 累计 {v.get('progress', 0)} 次")
-            elif k == "pig":
-                # 🐖 显示对应数量的🐖
-                count = v.get("progress", 0)
-                lines.append(f"✅ {name} x{count} —— {'🐖' * count}")
-            else:
-                lines.append(f"✅ {name} —— {desc}")
-        # 未解锁但有进度
-        progress_items = []
-        for k, v in achs.items():
-            if not v.get("unlocked") and v.get("progress"):
-                name = ACHIEVEMENTS.get(k, (k, ""))[0]
-                progress_items.append(f"  ⏳ {name} 进度：{v['progress']}")
-        if progress_items:
-            lines.append("")
-            lines.append("进行中：")
-            lines.extend(progress_items)
-        yield event.plain_result("\n".join(lines))
+        img_path = os.path.join(str(self.plugin_data_dir), f"my_achievements_{uid}.png")
+        from .game.guess_verse import render_achievements
+        render_achievements(uid, uname, achs, img_path)
+        yield event.image_result(img_path)
 
     # ==========================================
     # ⚔️ 邀战猜诗词（对战）
@@ -1464,7 +1439,8 @@ class PoetryPlugin(Star):
             pm = self.pm
             # 参与人数成就
             counts = {1: "solo_pass", 2: "double_pass", 3: "triple_pass",
-                      4: "four_scholar", 5: "five_poem"}
+                      4: "four_scholar", 5: "five_poem", 6: "six_scholar",
+                      7: "seven_sage", 8: "eight_scholar"}
             if n in counts:
                 if pm.unlock_achievement(p_uid, counts[n], p_name):
                     msgs.append(self._achieve_msg(p_uid, counts[n]))
@@ -1520,6 +1496,10 @@ class PoetryPlugin(Star):
                 new_lv = pm.check_closer(p_uid, cc, p_name)
                 if new_lv:
                     msgs.append(f"🏆 {p_name} 达成成就「{new_lv}」！")
+                # 神机妙算：猜诗句累计获胜 10 场
+                if st.get("guess_wins", 0) >= 10:
+                    if pm.unlock_achievement(p_uid, "guess_win_10", p_name):
+                        msgs.append(self._achieve_msg(p_uid, "guess_win_10"))
         return msgs
 
     def _settle_duel_achievements(self, duel, engine, winner_side, winner_uid):
@@ -1571,6 +1551,26 @@ class PoetryPlugin(Star):
             msgs.append(self._achieve_msg(a_id, "first_mover"))
         elif winner_side == "b" and self.pm.unlock_achievement(b_id, "second_mover", self._uid_name(b_id)):
             msgs.append(self._achieve_msg(b_id, "second_mover"))
+        # 常胜将军 / 百战不殆：对垒累计胜场
+        win_stats = self.pm.load(winner_uid).get("stats", {})
+        dw = win_stats.get("duel_wins", 0)
+        if dw >= 5:
+            if self.pm.unlock_achievement(winner_uid, "duel_win_5", self._uid_name(winner_uid)):
+                msgs.append(self._achieve_msg(winner_uid, "duel_win_5"))
+        if dw >= 10:
+            if self.pm.unlock_achievement(winner_uid, "duel_win_10", self._uid_name(winner_uid)):
+                msgs.append(self._achieve_msg(winner_uid, "duel_win_10"))
+        # 连胜追踪：胜者连胜 +1，败者清零（记录历史最高连胜）
+        cur_streak = win_stats.get("duel_streak", 0) + 1
+        win_stats["duel_streak"] = cur_streak
+        win_stats["max_duel_streak"] = max(win_stats.get("max_duel_streak", 0), cur_streak)
+        self.pm.save(winner_uid)
+        new_streak = self.pm.check_duel_streak(winner_uid, cur_streak, self._uid_name(winner_uid))
+        if new_streak:
+            msgs.append(f"🏆 {self._uid_name(winner_uid)} 达成成就「{new_streak}」！")
+        los_stats = self.pm.load(loser_id).get("stats", {})
+        los_stats["duel_streak"] = 0
+        self.pm.save(loser_id)
         # 复仇者：上局输给 loser_id，本局作为 winner_uid 赢回
         prev = self.pm.load(winner_uid).get("stats", {}).get("last_duel_lost_to")
         if prev == loser_id:

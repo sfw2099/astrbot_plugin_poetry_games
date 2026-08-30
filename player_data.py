@@ -19,6 +19,9 @@ ACHIEVEMENTS = {
     "triple_pass": ("三人行", "成功完成一次猜诗词，且本局有且只有三人参与"),
     "four_scholar": ("四大才子", "成功完成一次猜诗词，且本局有且只有四人参与"),
     "five_poem": ("我们的诗词!!!!!", "成功完成一次猜诗词，且本局有且只有五人参与"),
+    "six_scholar": ("=主", "成功完成一次猜诗词，且本局有且只有六人参与"),
+    "seven_sage": ("竹林七贤", "成功完成一次猜诗词，且本局有且只有七人参与"),
+    "eight_scholar": ("八大山人?", "成功完成一次猜诗词，且本局有且只有八人参与"),
     # 猜诗词 · 效率
     "minimalist": ("极简主义", "十次以内成功完成一次猜诗词"),
     "first_hit": ("一发入魂", "第一次猜测即猜中"),
@@ -40,6 +43,12 @@ ACHIEVEMENTS = {
     "second_mover": ("后发制人", "作为被挑战者在对垒中获胜"),
     "avenger": ("复仇者", "对垒输给某人后，下一局赢回"),
     "too_dark": ("太阴了！", "对垒中双方各累计 20 次猜测仍未分出胜负"),
+    # 对垒 · 里程碑
+    "duel_win_5": ("常胜将军", "对垒累计获胜 5 场"),
+    "duel_win_10": ("百战不殆", "对垒累计获胜 10 场"),
+    "duel_streak": ("一破·卧龙出山", "对垒连胜（升级制：双连→三连→四连→五连及更高）"),
+    # 猜诗句 · 里程碑
+    "guess_win_10": ("神机妙算", "猜诗句累计获胜 10 场"),
     # 个人积累
     "poet_100": ("小诗仙", "个人诗词数据达到 100 句"),
     "poet_1000": ("诗仙", "个人诗词数据达到 1000 句"),
@@ -68,6 +77,32 @@ def closer_level_name(progress):
         if progress >= thr:
             return name
     return "收尾人"
+
+
+def duel_streak_name(n):
+    """根据对垒连胜数返回成就名。
+
+    1 连：一破·卧龙出山
+    2 连：双连·一战成名
+    3 连：三连·举世皆惊
+    4 连：四连·天下无敌
+    5 连及更高：(N)连·诛天灭地
+    """
+    _CN = ["", "一", "二", "三", "四", "五", "六", "七", "八", "九", "十"]
+    if n <= 0:
+        return "连胜未开始"
+    if n == 1:
+        return "一破·卧龙出山"
+    if n == 2:
+        return "双连·一战成名"
+    if n == 3:
+        return "三连·举世皆惊"
+    if n == 4:
+        return "四连·天下无敌"
+    if n >= 5:
+        prefix = _CN[n] if n <= 10 else str(n)
+        return f"{prefix}连·诛天灭地"
+    return "一破·卧龙出山"
 
 
 # 旧版收尾人分阶成就 id（用于迁移清空）
@@ -118,6 +153,8 @@ class PlayerManager:
                     "duel_games": 0,
                     "duel_wins": 0,
                     "total_guesses": 0,
+                    "duel_streak": 0,      # 当前连胜
+                    "max_duel_streak": 0,  # 历史最高连胜
                 },
             }
         self.players[uid] = p
@@ -251,6 +288,26 @@ class PlayerManager:
         new_lv = closer_level_name(closer_count)
         self.save(uid)
         if new_lv != old_lv:
+            return new_lv
+        return None
+
+    def check_duel_streak(self, uid, streak, name=""):
+        """更新对垒最高连胜并检查是否升级。streak 为当前连胜数。
+        只记录历史最高连胜。返回升级后的成就名（若跨入新等级），否则返回 None。"""
+        p = self.load(uid, name)
+        cur = p["achievements"].get("duel_streak", {})
+        old_max = cur.get("progress", 0)
+        new_max = max(old_max, streak)
+        if new_max <= 0:
+            return None
+        p["achievements"]["duel_streak"] = {
+            "unlocked": True,
+            "time": cur.get("time", time.time()),
+            "progress": new_max,
+        }
+        new_lv = duel_streak_name(new_max)
+        self.save(uid)
+        if new_lv != duel_streak_name(old_max):
             return new_lv
         return None
 

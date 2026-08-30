@@ -1562,3 +1562,77 @@ def _draw_radical_row(draw, x0, y, layout, cell_w, punct_w, cell_h, gap, guess_t
             cc = {"correct": (0, 150, 40), "present": (230, 110, 0), "absent": (160, 160, 160)}[char_status[i]]
             draw.text((x + cell_w // 2, y + cell_h // 2), ch, fill=cc, font=f_char, anchor="mm")
         cx += cell_w + gap
+
+
+def render_achievements(uid, uname, achs, output_path):
+    """渲染玩家成就列表图。
+
+    achs: 成就字典 {id: {unlocked, time, progress}}（含未解锁）。
+    """
+    try:
+        from ..player_data import ACHIEVEMENTS, closer_level_name, duel_streak_name
+    except ImportError:
+        from player_data import ACHIEVEMENTS, closer_level_name, duel_streak_name
+    pad = 30
+    title_h = 70
+    row_h = 40
+    item_font = _get_font(19)
+    title_font = _get_font(26)
+    small_font = _get_font(14)
+
+    unlocked = {k: v for k, v in achs.items() if v.get("unlocked")}
+    progress_items = [
+        k for k, v in achs.items() if not v.get("unlocked") and v.get("progress")
+    ]
+    total = len(unlocked)
+    rows = len(unlocked) + len(progress_items)
+    lines_extra = 1 if progress_items else 0  # "进行中" 分隔行
+
+    img_w = 720
+    img_h = pad + title_h + rows * (row_h + 6) + lines_extra * (row_h + 6) + pad
+
+    img = Image.new("RGB", (img_w, img_h), (250, 250, 252))
+    draw = ImageDraw.Draw(img)
+
+    draw.text((img_w // 2, 20), f"🏅 {uname} 的成就（{total}/{len(ACHIEVEMENTS)}）", fill=(40, 40, 40), font=title_font, anchor="mt")
+
+    y = pad + title_h
+    if not unlocked:
+        draw.text((img_w // 2, y), "（暂无成就，快去玩游戏吧！）", fill=(120, 120, 125), font=item_font, anchor="mm")
+        y += row_h + 6
+    for k in unlocked:
+        v = achs[k]
+        name = ACHIEVEMENTS.get(k, (k, ""))[0]
+        desc = ACHIEVEMENTS.get(k, (k, ""))[1]
+        if k == "closer":
+            name = closer_level_name(v.get("progress", 0))
+            desc = f"累计 {v.get('progress', 0)} 次"
+        elif k == "pig":
+            name = f"{name} x{v.get('progress', 0)}"
+            desc = "🐖" * v.get("progress", 0)
+        elif k == "duel_streak":
+            name = duel_streak_name(v.get("progress", 0))
+            desc = f"最高 {v.get('progress', 0)} 连"
+        draw.rounded_rectangle([pad, y, img_w - pad, y + row_h], radius=8, fill=(255, 255, 255),
+                               outline=(200, 200, 205), width=1)
+        draw.text((pad + 14, y + row_h // 2), f"✅ {name}", fill=(40, 40, 40), font=item_font, anchor="lm")
+        draw.text((img_w - pad - 14, y + row_h // 2), desc, fill=(120, 120, 125), font=small_font, anchor="rm")
+        y += row_h + 6
+    if progress_items:
+        draw.text((pad + 14, y + row_h // 2), "—— 进行中 ——", fill=(160, 160, 165), font=small_font, anchor="lm")
+        y += row_h + 6
+        for k in progress_items:
+            v = achs[k]
+            name = ACHIEVEMENTS.get(k, (k, ""))[0]
+            desc = f"进度：{v['progress']}"
+            if k == "duel_streak":
+                name = duel_streak_name(v.get("progress", 0))
+                desc = f"最高 {v.get('progress', 0)} 连"
+            draw.rounded_rectangle([pad, y, img_w - pad, y + row_h], radius=8, fill=(248, 248, 250),
+                                   outline=(220, 220, 225), width=1)
+            draw.text((pad + 14, y + row_h // 2), f"⏳ {name}", fill=(120, 120, 125), font=item_font, anchor="lm")
+            draw.text((img_w - pad - 14, y + row_h // 2), desc, fill=(160, 160, 165), font=small_font, anchor="rm")
+            y += row_h + 6
+
+    img.save(output_path, "PNG")
+    return output_path
