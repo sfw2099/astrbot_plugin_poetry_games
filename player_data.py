@@ -57,6 +57,7 @@ ACHIEVEMENTS = {
     "early_bird": ("雄鸡一唱天下白", "在 5:00-8:00 期间完成一局诗词游戏"),
     "five_word": ("五言专家", "个人诗句库中 5 字单句累计 100 条"),
     "seven_word": ("七言高手", "个人诗句库中 7 字单句累计 100 条"),
+    "beloved_verse": ("挚爱诗句", "某诗句使用次数≥50 且为本人使用频率最高的诗句"),
 }
 
 # 收尾人等级：按累计次数映射等级名（升序）
@@ -306,6 +307,31 @@ class PlayerManager:
         if new_lv != duel_streak_name(old_max):
             return new_lv
         return None
+
+    def check_beloved_verse(self, uid, name=""):
+        """挚爱诗句成就：使用次数≥50 且为本人使用频率最高的诗句。
+
+        动态更新：若最高频诗句变化则更新成就名。返回 (verse, count) 当新解锁或
+        名称/次数变化时，否则返回 None。"""
+        p = self.load(uid, name)
+        verses = p["verses"]
+        if not verses:
+            return None
+        top_verse = max(verses, key=lambda v: verses[v].get("count", 0))
+        top_count = verses[top_verse].get("count", 0)
+        if top_count < 50:
+            return None
+        cur = p["achievements"].get("beloved_verse", {})
+        if cur.get("unlocked") and cur.get("verse") == top_verse and cur.get("progress") == top_count:
+            return None
+        p["achievements"]["beloved_verse"] = {
+            "unlocked": True,
+            "time": cur.get("time", time.time()),
+            "progress": top_count,
+            "verse": top_verse,
+        }
+        self.save(uid)
+        return (top_verse, top_count)
 
     def add_pig(self, uid, name=""):
         """🐖 成就：一局中重复诗句计数 +1。返回最新累计数。"""

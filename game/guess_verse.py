@@ -1613,6 +1613,9 @@ def render_achievements(uid, uname, achs, output_path):
         elif k == "duel_streak":
             name = duel_streak_name(v.get("progress", 0))
             desc = f"最高 {v.get('progress', 0)} 连"
+        elif k == "beloved_verse":
+            name = f"挚爱诗句-{v.get('verse', '')}"
+            desc = f"使用 {v.get('progress', 0)} 次"
         draw.rounded_rectangle([pad, y, img_w - pad, y + row_h], radius=8, fill=(255, 255, 255),
                                outline=(200, 200, 205), width=1)
         draw.text((pad + 14, y + row_h // 2), f"[已解锁] {name}", fill=(40, 40, 40), font=item_font, anchor="lm")

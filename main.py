@@ -1478,6 +1478,11 @@ class PoetryPlugin(Star):
             # 个人诗句/字数成就
             for a in pm.check_verse_achievements(p_uid, p_name):
                 msgs.append(self._achieve_msg(p_uid, a))
+            # 挚爱诗句：使用≥50次且为最高频诗句（动态更新）
+            beloved = pm.check_beloved_verse(p_uid, p_name)
+            if beloved:
+                bv, bc = beloved
+                msgs.append(f"🏆 {p_name} 达成成就「挚爱诗句-{bv}」！（使用 {bc} 次）")
             # 赢家统计
             if p_uid == winner_uid:
                 pm.inc_stat(p_uid, "guess_wins", 1, p_name)
@@ -1579,6 +1584,12 @@ class PoetryPlugin(Star):
         # 记录输家输给谁（供下局复仇判定）
         self.pm.load(loser_id).setdefault("stats", {})["last_duel_lost_to"] = winner_uid
         self.pm.save(loser_id)
+        # 挚爱诗句：使用≥50次且为最高频诗句（双方都检查，动态更新）
+        for p in (a_id, b_id):
+            beloved = self.pm.check_beloved_verse(p, self._uid_name(p))
+            if beloved:
+                bv, bc = beloved
+                msgs.append(f"🏆 {self._uid_name(p)} 达成成就「挚爱诗句-{bv}」！（使用 {bc} 次）")
         return msgs
 
     def _check_soulmate(self, duel, a_id, b_id):
