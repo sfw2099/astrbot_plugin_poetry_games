@@ -1431,6 +1431,12 @@ class PoetryPlugin(Star):
         user_guesses = getattr(engine, "user_guesses", {})
         n = len(participants)
         total = len(engine.history)
+        # 本局答案汉字（供季节/内容成就检测）
+        target_hanzi = getattr(engine, "target_hanzi", "") or ""
+        # 本局所有猜测文本拼接（供「春日影」检测：春/日/影 三字都出现过）
+        all_guess_text = ""
+        for _t, _p, _c in getattr(engine, "history", []):
+            all_guess_text += _t or ""
         # 日志：本局参与人数与参与者，便于排查成就触发
         logger.info(f"[成就] 猜诗句结算：本局参与 {n} 人 → {sorted(participants)}")
 
@@ -1483,6 +1489,21 @@ class PoetryPlugin(Star):
             if beloved:
                 bv, bc = beloved
                 msgs.append(f"🏆 {p_name} 达成成就「挚爱诗句-{bv}」！（使用 {bc} 次）")
+            # 诗词内容 · 季节成就
+            season_map = {"春": 1, "夏": 2, "秋": 4, "冬": 8}
+            season_ach = {"春": "spring_redemption", "夏": "summer_apprentice",
+                          "秋": "autumn_corpse", "冬": "winter_breath"}
+            for s, bit in season_map.items():
+                if s in target_hanzi:
+                    if pm.unlock_achievement(p_uid, season_ach[s], p_name):
+                        msgs.append(self._achieve_msg(p_uid, season_ach[s]))
+                    # 斯蒂芬·金：集齐四季
+                    if pm.collect_season(p_uid, bit, p_name):
+                        msgs.append(self._achieve_msg(p_uid, "king_stephen"))
+            # 《春日影》：≥3人参与 且 本局猜测中出现过「春」「日」「影」三字
+            if n >= 3 and all(ch in all_guess_text for ch in "春日影"):
+                if pm.unlock_achievement(p_uid, "spring_film", p_name):
+                    msgs.append(self._achieve_msg(p_uid, "spring_film"))
             # 赢家统计
             if p_uid == winner_uid:
                 pm.inc_stat(p_uid, "guess_wins", 1, p_name)
