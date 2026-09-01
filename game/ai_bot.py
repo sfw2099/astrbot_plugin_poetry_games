@@ -3,9 +3,9 @@
 
 架构：
 - 读工具（get_verse_state / get_duel_state / search_verses / get_pinyin_hint）
-  通过 FunctionTool 暴露给 LLM（方案 A：tool_loop_agent）。
-- 猜测动作由插件执行：LLM 最终输出「猜：诗句」，插件解析后调用 _apply_*_guess。
-- 方案 C 降级：不支持 FC 时，用 llm_generate + 候选列表单次决策。
+  + 写工具 submit_guess（提交猜测）通过 FunctionTool 暴露给 LLM。
+- 猜测由 submit_guess 工具执行（结构化调用，不依赖自由文本格式）。
+- 方案 C 降级：不支持 FC 时，用 llm_generate + 候选列表 + 解析「猜：诗句」。
 """
 
 import random
@@ -23,6 +23,7 @@ try:
     from astrbot.core.agent.run_context import ContextWrapper
     from astrbot.core.agent.tool import FunctionTool, ToolExecResult, ToolSet
     from astrbot.core.astr_agent_context import AstrAgentContext
+    from astrbot.api.all import Plain, Image, MessageChain
     _ASTRBOT_OK = True
 except Exception:
     _ASTRBOT_OK = False
@@ -33,24 +34,31 @@ except Exception:
     ToolSet = None
     AstrAgentContext = None
     Field = None
+    Plain = None
+    Image = None
+    MessageChain = None
 
 
-SYSTEM_PROMPT = """你是诗词游戏玩家「{bot_name}」。你在和群友玩诗词游戏（猜诗句 / 诗词对垒）。请使用工具获取局势、检索诗句，最终猜出答案。
+SYSTEM_PROMPT = """你是诗词游戏玩家「{bot_name}」。你在和群友玩诗词游戏（猜诗句 / 诗词对垒）。
+
+你的任务：通过工具获取局势、检索诗句，最终用 submit_guess 工具提交一次猜测。
 
 可用工具：
 - get_verse_state：查看「猜诗句」当前局势与已猜反馈
 - get_duel_state：查看「诗词对垒」当前局势与双方反馈
 - search_verses：按字/字数/声母/韵母检索候选诗句
 - get_pinyin_hint：查看拼音模式下的声母韵母提示
+- submit_guess：提交你的猜测（必须调用！）
 
-策略：
-1. 先用 get_verse_state 或 get_duel_state 了解局势和每格反馈。
-2. 根据反馈（绿字位置固定、橙字保留、灰字排除）用 search_verses 检索候选诗句。
-3. 从候选中选出最可能的一句。
+流程（严格遵守）：
+1. 用 get_verse_state 或 get_duel_state 了解局势和每格反馈。
+2. 根据反馈（绿字位置固定、橙字保留、灰字排除）用 search_verses 检索候选。
+3. 从候选中选出最可能的一句，调用 submit_guess(text=该诗句) 提交猜测。
+4. submit_guess 会返回反馈。若未猜中，可继续检索并再次 submit_guess，直到猜中或信息不足。
 
-回复格式（严格遵守，只输出两行）：
-第一行：一句简短自然的发言（不超过 30 字，像真人玩家，不要提及工具或原始数据）。
-第二行：你的猜测，格式「猜：诗句」（纯汉字、无标点、字数必须等于答案字数）。
+注意：
+- 不要用文本格式「猜：XXX」，一律通过 submit_guess 工具提交。
+- 最终可以输出一句简短自然的发言（不超过 30 字），但不要提及工具或原始数据。
 """
 
 
@@ -124,6 +132,27 @@ if _ASTRBOT_OK:
         async def call(self, context: ContextWrapper[AstrAgentContext], **kwargs) -> ToolExecResult:
             return self.bot.get_pinyin_hint(kwargs.get("session_id", ""))
 
+    @dataclass
+    class SubmitGuessTool(FunctionTool[AstrAgentContext]):
+        name: str = "submit_guess"
+        description: str = "提交你的诗句猜测。text 为猜测的诗句（纯汉字，两句需带标点）。"
+        parameters: dict = Field(default_factory=lambda: {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "要猜测的诗句"},
+                "session_id": {"type": "string", "description": "会话ID，可留空"},
+            },
+            "required": ["text"],
+        })
+        bot: object = None
+
+        async def call(self, context: ContextWrapper[AstrAgentContext], **kwargs) -> ToolExecResult:
+            event = getattr(context.context, "event", None)
+            origin = getattr(event, "unified_msg_origin", None) if event is not None else None
+            return await self.bot.submit_guess(
+                kwargs.get("session_id", ""), kwargs.get("text", ""), origin,
+            )
+
 
 class BotPlayer:
     """AI bot 玩家：决策入口，封装 tool_loop_agent 调用与降级 fallback。"""
@@ -134,6 +163,7 @@ class BotPlayer:
         self.bot_name = bot_name or BOT_NAME
         self.cooldown = cooldown
         self.puzzle_ai_ratio = puzzle_ai_ratio
+        self._origin = None
 
     # ============ 工具实现（供 FunctionTool.call 委托） ============
 
@@ -197,6 +227,58 @@ class BotPlayer:
         ok_f = sorted([k for k, v in final_status.items() if v == "correct"])
         return f"已确认声母：{ok_i or '无'}\n已确认韵母：{ok_f or '无'}"
 
+    async def _send_result(self, origin, msgs):
+        if not origin or _ASTRBOT_OK is False:
+            return
+        for kind, payload in msgs:
+            try:
+                if kind == "text":
+                    await self.plugin.context.send_message(origin, MessageChain([Plain(payload)]))
+                else:
+                    await self.plugin.context.send_message(origin, MessageChain([Image.fromFileSystem(payload)]))
+            except Exception:
+                pass
+
+    async def submit_guess(self, session_id, text, origin=None):
+        """提交猜测（猜诗句或对垒）。执行猜测 + 发图到群，返回反馈文本给 LLM。"""
+        plugin = self.plugin
+        if not origin:
+            origin = self._origin
+        hanzi = extract_hanzi(text)
+        if not hanzi:
+            return "猜测内容无效，请提供诗句。"
+        # 猜诗句
+        vs = getattr(plugin, "guess_verse_sessions", {})
+        sid = self._pick_session(vs, session_id)
+        if sid and sid in vs:
+            engine = vs[sid]
+            result = plugin._apply_verse_guess(engine, sid, BOT_ID, self.bot_name, text)
+            if not result["ok"]:
+                return f"猜测失败：{result['err']}"
+            await self._send_result(origin, result["msgs"])
+            if result["all_correct"]:
+                return "已猜中！游戏结束。"
+            return "已提交猜测。当前反馈：\n" + build_verse_state_text(engine, sid)
+        # 对垒
+        ds = getattr(plugin, "duel_sessions", {})
+        sid = self._pick_session(ds, session_id)
+        if sid and sid in ds:
+            duel = ds[sid]
+            engine = duel.get("engine")
+            if not engine:
+                return "对垒尚未开始。"
+            if not engine.is_turn(BOT_ID):
+                return "本轮已提交过猜测（轮到对方），请结束本轮。"
+            result = plugin._apply_duel_guess(duel, sid, BOT_ID, self.bot_name, text)
+            if not result["ok"]:
+                return f"猜测失败：{result['err']}"
+            await self._send_result(origin, result["msgs"])
+            if result["all_correct"]:
+                return "已猜中！对垒结束。"
+            side = "a" if str(engine.a_id) == BOT_ID else "b"
+            return "已提交猜测。当前反馈：\n" + build_duel_state_text(engine, side)
+        return "找不到对应的游戏会话。"
+
     # ============ LLM 调用 ============
 
     async def _provider_id(self, event=None):
@@ -228,6 +310,9 @@ class BotPlayer:
         p = GetPinyinHintTool()
         p.bot = self
         tools.append(p)
+        g = SubmitGuessTool()
+        g.bot = self
+        tools.append(g)
         return tools
 
     async def _run_agent(self, event, tools, prompt):
@@ -241,7 +326,7 @@ class BotPlayer:
                 prompt=prompt,
                 system_prompt=SYSTEM_PROMPT.format(bot_name=self.bot_name),
                 tools=ToolSet(tools),
-                max_steps=12,
+                max_steps=8,
                 tool_call_timeout=30,
             )
             return resp.completion_text
@@ -266,9 +351,10 @@ class BotPlayer:
     # ============ 决策入口 ============
 
     async def think_and_guess_verse(self, engine, session_id, event=None):
-        """猜诗句：返回 (guess_text, speech)。"""
+        """猜诗句：返回 (guess_text, speech)。guess_text 为降级路径解析的猜测（方案 C）；
+        方案 A 下猜测已由 submit_guess 工具提交，guess_text 为 None。"""
         state_text = build_verse_state_text(engine, session_id)
-        prompt = f"当前猜诗句局势：\n{state_text}\n\n请推理并给出你的猜测。"
+        prompt = f"当前猜诗句局势：\n{state_text}\n\n请推理并用 submit_guess 工具提交你的猜测。"
         tools = self._build_tools(include_verse=True, include_duel=False)
         speech = await self._run_agent(event, tools, prompt) if tools else None
         if not speech:
@@ -280,10 +366,10 @@ class BotPlayer:
         return parse_guess_from_speech(speech)
 
     async def think_and_guess_duel(self, duel, engine, event=None):
-        """对垒：返回 (guess_text, speech)。"""
+        """对垒：返回 (guess_text, speech)。方案 A 下猜测已由 submit_guess 工具提交。"""
         side = "a" if str(engine.a_id) == BOT_ID else "b"
         state_text = build_duel_state_text(engine, side)
-        prompt = f"当前对垒局势：\n{state_text}\n\n请推理并给出你的猜测。"
+        prompt = f"当前对垒局势：\n{state_text}\n\n请推理并用 submit_guess 工具提交你的猜测。"
         tools = self._build_tools(include_verse=False, include_duel=True)
         speech = await self._run_agent(event, tools, prompt) if tools else None
         if not speech:

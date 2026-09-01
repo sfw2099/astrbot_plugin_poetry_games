@@ -1850,6 +1850,7 @@ class PoetryPlugin(Star):
 
     async def _bot_duel_think(self, duel, sid, origin, event=None):
         """bot 思考并提交对垒猜测，随后发消息到群。"""
+        self.ai_bot._origin = origin
         try:
             engine = duel.get("engine")
             if not engine:
@@ -1994,6 +1995,7 @@ class PoetryPlugin(Star):
 
     async def _bot_verse_think(self, engine, session_id, origin, event=None):
         """bot 思考并提交猜诗句猜测，随后发消息到群。"""
+        self.ai_bot._origin = origin
         try:
             guess, speech = await self.ai_bot.think_and_guess_verse(engine, session_id, event)
             if not guess:
@@ -2140,6 +2142,11 @@ class PoetryPlugin(Star):
         if self.ai_bot.enabled and session_id in self.guess_verse_sessions:
             if self._is_bot_trigger(event, msg_raw):
                 if self._try_bot_verse_guess(event, session_id):
+                    # 已触发 bot 帮猜，阻断默认 LLM/Agent 回复
+                    try:
+                        event.should_call_llm(True)
+                    except Exception:
+                        pass
                     return
 
         # 🎯 猜诗句游戏处理
