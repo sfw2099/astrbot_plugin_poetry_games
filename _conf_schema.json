@@ -43,5 +43,39 @@
             "max": 20,
             "step": 1
         }
+    },
+    "ai_bot_enabled": {
+        "title": "启用 AI 机器人参与游戏",
+        "description": "开启后，机器人可通过 AI（Function Calling）参与诗词对垒和猜诗句",
+        "type": "bool",
+        "default": false
+    },
+    "ai_bot_cooldown": {
+        "title": "AI 机器人思考冷却(秒)",
+        "description": "猜诗句中被 @ 喊话触发猜句后，冷却期内不再响应，避免多人并发",
+        "type": "int",
+        "default": 10,
+        "slider": {
+            "min": 3,
+            "max": 60,
+            "step": 1
+        }
+    },
+    "ai_bot_puzzle_ai_ratio": {
+        "title": "AI 出题概率(%)",
+        "description": "对垒中 bot 出题时，使用 AI 出题的概率；其余概率从总库随机抽取",
+        "type": "int",
+        "default": 50,
+        "slider": {
+            "min": 0,
+            "max": 100,
+            "step": 10
+        }
+    },
+    "ai_bot_trigger_words": {
+        "title": "自定义触发词（逗号分隔）",
+        "description": "猜诗句中除了 @机器人 之外，额外触发 bot 帮猜的关键词，如：bot猜,帮忙猜",
+        "type": "string",
+        "default": "bot猜,帮忙猜,让bot猜"
     }
 }

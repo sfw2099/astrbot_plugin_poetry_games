@@ -21,6 +21,8 @@ from .game.guess_verse import DuelVerseEngine, render_duel, pick_puzzle_verse
 from .game.guess_verse import extract_hanzi, extract_punct
 from .game.guess_verse import INITIALS_LIST, FINALS_LIST
 from .player_data import PlayerManager, ACHIEVEMENTS
+from .game.base_game import BOT_ID
+from .game.ai_bot import BotPlayer
 
 GITEE_BASE = "https://gitee.com/alin1031/poetry-data/releases/download/v1.0.0/poetry_data.zip"
 GITEE_PROBE = GITEE_BASE + ".part01"  # 探测分片而非基文件（基文件不存在）
@@ -70,6 +72,19 @@ class PoetryPlugin(Star):
         self.guess_verse_sessions = {}
         self.battle_sessions = {}  # 邀战对战会话
         self.duel_sessions = {}    # 诗词对垒会话
+        # AI bot 玩家
+        self.ai_bot = BotPlayer(
+            self,
+            enabled=self.config.get("ai_bot_enabled", False),
+            cooldown=self.config.get("ai_bot_cooldown", 10),
+            puzzle_ai_ratio=self.config.get("ai_bot_puzzle_ai_ratio", 50),
+        )
+        self._ai_bot_trigger_words = set()
+        for w in str(self.config.get("ai_bot_trigger_words", "bot猜,帮忙猜,让bot猜")).split(","):
+            w = w.strip()
+            if w:
+                self._ai_bot_trigger_words.add(w)
+        self._ai_bot_cooldown_until = 0.0  # 猜诗句 bot 冷却截止时间戳
         try:
             _init_plugin_dir(os.path.dirname(os.path.abspath(__file__)))
         except Exception:
@@ -691,8 +706,14 @@ class PoetryPlugin(Star):
         sender_id = str(event.get_sender_id())
         sender_name = event.get_sender_name() or f"用户{sender_id}"
 
-        # ===== 解析参数：@某人 / 格式(4-7 或 44/34/43/55/77) / 提示方式(声|形)，可组合任意顺序 =====
+        # ===== 解析参数：@某人 / bot / 格式(4-7 或 44/34/43/55/77) / 提示方式(声|形)，可组合任意顺序 =====
         target_id = self._extract_at_id(event)
+        # 机器人自身账号 ID（用于识别 @机器人 挑战 bot）
+        bot_self_id = None
+        try:
+            bot_self_id = str(getattr(getattr(event, "message_obj", None), "self_id", "") or "")
+        except Exception:
+            pass
         fmt = None
         hint_mode = None
         msg_text = str(event.get_message_str() or "")
@@ -708,21 +729,33 @@ class PoetryPlugin(Star):
             parsed = self._parse_poem_format(token)
             if parsed:
                 if fmt is not None:
-                    yield event.plain_result("❌ 只能指定一种格式（4/5/6/7 单句 或 44/34/43/55/77 两句）。\n用法：/诗词对垒 [@某人] [格式] [声|形]")
+                    yield event.plain_result("❌ 只能指定一种格式（4/5/6/7 单句 或 44/34/43/55/77 两句）。\n用法：/诗词对垒 [@某人|bot] [格式] [声|形]")
                     return
                 fmt = parsed
             elif token in ("声", "形", "拼音", "部首"):
                 if hint_mode is not None:
-                    yield event.plain_result("❌ 只能指定一种提示方式（声=拼音 / 形=部首）。\n用法：/诗词对垒 [@某人] [格式] [声|形]")
+                    yield event.plain_result("❌ 只能指定一种提示方式（声=拼音 / 形=部首）。\n用法：/诗词对垒 [@某人|bot] [格式] [声|形]")
                     return
                 hint_mode = "pinyin" if token in ("声", "拼音") else "radical"
+            elif token.lower() in ("bot", "机器人", "ai"):
+                if not self.ai_bot.enabled:
+                    yield event.plain_result("⚠️ AI 机器人未启用（请在插件配置中开启「启用 AI 机器人参与游戏」）。")
+                    return
+                target_id = BOT_ID
             else:
                 yield event.plain_result(
-                    f"❌ 无效参数「{token}」。\n用法：/诗词对垒 [@某人] [格式] [声|形]\n"
+                    f"❌ 无效参数「{token}」。\n用法：/诗词对垒 [@某人|bot] [格式] [声|形]\n"
                     f"格式：4/5/6/7 单句，或 44/34/43/55/77 两句\n"
-                    f"例如：/诗词对垒 4 声 ｜ /诗词对垒 55 形 @某人 ｜ /诗词对垒 7"
+                    f"例如：/诗词对垒 4 声 ｜ /诗词对垒 55 形 @某人 ｜ /诗词对垒 bot 7"
                 )
                 return
+
+        # @机器人 视为挑战 bot
+        if bot_self_id and target_id == bot_self_id:
+            target_id = BOT_ID
+        if target_id == BOT_ID and not self.ai_bot.enabled:
+            yield event.plain_result("⚠️ AI 机器人未启用（请在插件配置中开启「启用 AI 机器人参与游戏」）。")
+            return
 
         if target_id == sender_id:
             yield event.plain_result("不能挑战自己哦~")
@@ -747,7 +780,9 @@ class PoetryPlugin(Star):
             hint_mode = "pinyin" if _r2.random() < 0.70 else "radical"
 
         target_name = None
-        if target_id:
+        if target_id == BOT_ID:
+            target_name = self.ai_bot.bot_name
+        elif target_id:
             target_name = f"用户{target_id}"
             try:
                 info = await event.bot.api.call_action("get_group_member_info", group_id=int(group_id), user_id=int(target_id))
@@ -758,7 +793,7 @@ class PoetryPlugin(Star):
                 pass
 
         self.duel_sessions[session_id] = {
-            "state": "wait_confirm",
+            "state": "wait_puzzle" if target_id == BOT_ID else "wait_confirm",
             "challenger_id": sender_id,
             "challenger_name": sender_name,
             "opponent_id": target_id,   # 无@则为 None，由第一个回复【接受】者担任
@@ -770,11 +805,26 @@ class PoetryPlugin(Star):
             "engine": None,
             "group_origin": getattr(event, "unified_msg_origin", None),
             "created_at": time.time(),
+            "bot_thinking": False,
         }
 
         hint_label = "拼音" if hint_mode == "pinyin" else "部首"
         fmt_desc = self._format_desc(fmt)
-        if target_id:
+        if target_id == BOT_ID:
+            # 挑战 bot：跳过接受确认，直接进入出题阶段；bot 自动出题
+            hint = (f"🍵 【诗词对垒】提示方式：{hint_label}，格式：{fmt_desc}\n"
+                    f"请发送「{fmt_desc}」诗句作为你的题目（总库中，前缀「cc」）。\n"
+                    f"单句例：cc 床前明月光 ｜ 两句例：cc 离离原上草，一岁一枯荣")
+            await self._send_private(event.bot, sender_id, hint)
+            asyncio.create_task(self._bot_do_puzzle(session_id, fmt, event))
+            yield event.plain_result(
+                f"🍵 【诗词对垒】\n"
+                f"{sender_name} 向 {target_name} 发起对垒！\n"
+                f"双方各出「{fmt_desc}」诗句，随后互猜对方诗句，先猜中者获胜。\n"
+                f"提示方式：{hint_label}\n"
+                f"已私聊你出题提示，{target_name} 正在出题中..."
+            )
+        elif target_id:
             yield event.plain_result(
                 f"🍵 【诗词对垒】\n"
                 f"{sender_name} 向 {target_name} 发起对垒！\n"
@@ -996,34 +1046,12 @@ class PoetryPlugin(Star):
             # 记录出题诗句到个人数据
             self.pm.record_verse(uid, clean, event.get_sender_name() or f"用户{uid}")
             _block_llm()
-            # 双方都出题后进入猜测阶段 —— 状态变更放在 yield 之前，确保执行
+            # 双方都出题后进入猜测阶段
             if len(duel["puzzle_done"]) >= 2:
-                a_id = duel["challenger_id"]
-                b_id = duel["opponent_id"]
-                engine = DuelVerseEngine(
-                    duel["puzzles"][a_id], duel["puzzles"][b_id],
-                    a_id, duel["challenger_name"],
-                    b_id, duel["opponent_name"],
-                )
-                duel["engine"] = engine
-                duel["state"] = "playing"
-                # 心有灵犀：双方题同属一首诗
-                soulmate_msgs = self._check_soulmate(duel, a_id, b_id)
-                # 对垒出题关系成就：作者/朝代/相同字/月花酒山江
-                puzzle_msgs = self._check_duel_puzzle_achievements(duel, a_id, b_id)
-                origin = duel.get("group_origin")
-                if origin:
-                    try:
-                        chain = [Plain(f"🍵 双方已出题！开始互猜！\n"
-                                       f"{duel['challenger_name']} 猜 {duel['opponent_name']} 的题，{duel['opponent_name']} 猜 {duel['challenger_name']} 的题。\n"
-                                       f"先轮到：{engine.current_name()}（发送「cc 诗句」猜测）")]
-                        await self.context.send_message(origin, MessageChain(chain))
-                    except Exception as e:
-                        logger.error(f"[duel] 群通知发送失败: {e}")
-                for m in soulmate_msgs:
-                    yield event.plain_result(m)
-                for m in puzzle_msgs:
-                    yield event.plain_result(m)
+                engine = self._start_duel_playing(duel, sid)
+                # 若 bot 先手，触发 bot 思考
+                if engine and engine.is_turn(BOT_ID):
+                    self._maybe_bot_duel_turn(duel, sid, event)
             yield event.plain_result(f"✅ 出题成功！题目：{clean}。等待对方出题...")
             return
 
@@ -1041,109 +1069,18 @@ class PoetryPlugin(Star):
                 _block_llm()
                 return
             clean = re.sub(r'^cc\s*', '', msg_raw).strip()
-            hanzi = re.sub(r'[^\u4e00-\u9fff]', '', clean)
-            side = "a" if uid == engine.a_id else "b"
-            target_punct = engine.a_target_punct if side == "a" else engine.b_target_punct
-            target_len = len(engine.a_target_hanzi if side == "a" else engine.b_target_hanzi)
-            if not hanzi or len(hanzi) != target_len:
-                _block_llm()
-                return
-            # 库校验（两句需为库中相邻两句）
-            if target_punct:
-                segs = re.split(r'[，。！？、；：]', clean)
-                segs = [re.sub(r'[^\u4e00-\u9fff]', '', s) for s in segs if re.sub(r'[^\u4e00-\u9fff]', '', s)]
-                if len(segs) != 2 or not self.db or not self.db.is_adjacent_pair(segs[0], segs[1]):
-                    _block_llm()
-                    yield event.plain_result(f"「{clean}」未在诗词库中（需为库中相邻两句）。")
-                    return
-            else:
-                if not self._is_in_library(clean):
-                    _block_llm()
-                    yield event.plain_result(f"「{clean}」不在诗词库中，请输入曲库诗句。")
-                    return
-            ok, err, side, comp, all_correct = engine.guess(uid, clean)
-            if not ok:
-                _block_llm()
-                yield event.plain_result(err)
-                return
-            # 记录猜测诗句到个人数据（仅合法猜测）
-            self.pm.record_verse(uid, clean, event.get_sender_name() or f"用户{uid}")
-            self.pm.inc_stat(uid, "total_guesses", 1, event.get_sender_name() or f"用户{uid}")
-            # 🐖 重复诗句检测（本局内自己发过的纯汉字）
-            if "user_verses" not in duel:
-                duel["user_verses"] = {}
-            duel["user_verses"].setdefault(uid, set())
-            if hanzi in duel["user_verses"][uid]:
-                pig_count = self.pm.add_pig(uid, event.get_sender_name() or f"用户{uid}")
-                yield event.plain_result(f"🐖 {event.get_sender_name() or f'用户{uid}'} 重复诗句！猪+1（{'🐖' * pig_count}）")
-            else:
-                duel["user_verses"][uid].add(hanzi)
-            # 追踪对垒双方猜测次数
-            if "guess_counts" not in duel:
-                duel["guess_counts"] = {}
-            duel["guess_counts"][uid] = duel["guess_counts"].get(uid, 0) + 1
-            # 追踪本局声母/韵母使用（供 于无声处听惊雷 / 绕梁余韵）
-            if "user_initials" not in duel:
-                duel["user_initials"] = {}
-                duel["user_finals"] = {}
-            duel["user_initials"].setdefault(uid, set())
-            duel["user_finals"].setdefault(uid, set())
-            side_parts = []
-            if side == "a" and engine.a_history:
-                side_parts = engine.a_history[-1][1]
-            elif side == "b" and engine.b_history:
-                side_parts = engine.b_history[-1][1]
-            for gp in side_parts:
-                if gp.get("initial"):
-                    duel["user_initials"][uid].add(gp["initial"])
-                if gp.get("final"):
-                    duel["user_finals"][uid].add(gp["final"])
-            # 一事无成：一次猜测每个格子全灰（字/声母/韵母 均 absent，声调不参与判定）
-            if comp and all(
-                c is not None and c.get("char") == "absent"
-                and c.get("initial") == "absent" and c.get("final") == "absent"
-                for c in comp
-            ):
-                if self.pm.unlock_achievement(uid, "all_gray", event.get_sender_name() or f"用户{uid}"):
-                    yield event.plain_result(self._achieve_msg(uid, "all_gray"))
-            # 旗开得胜：开局首句（本局第1条合法猜测），出现存在的字或完整拼音
-            if len(engine.a_history) + len(engine.b_history) == 1:
-                has_char = any(c is not None and c.get("char") in ("correct", "present") for c in comp)
-                has_pinyin = any(
-                    c is not None and c.get("initial") in ("correct", "present")
-                    and c.get("final") in ("correct", "present")
-                    for c in comp
-                )
-                if has_char or has_pinyin:
-                    if self.pm.unlock_achievement(uid, "first_hit_char", event.get_sender_name() or f"用户{uid}"):
-                        yield event.plain_result(self._achieve_msg(uid, "first_hit_char"))
-            img_path = os.path.join(str(self.plugin_data_dir), f"duel_{sid}.png")
-            render_duel(engine, img_path, hint_mode=duel.get("hint_mode", "pinyin"))
             _block_llm()
-            # 先处理状态/胜负，再统一 yield（避免生成器被中断导致不推进）
-            if all_correct:
-                wname = engine.side_name(side)
-                win_text = (
-                    f"🏆 {wname} 猜中了对方的诗句！\n"
-                    f"{engine.a_name} 的题：{engine.a_puzzle}\n"
-                    f"{engine.b_name} 的题：{engine.b_puzzle}"
-                )
-                # ===== 对垒成就结算 =====
-                for m in self._settle_duel_achievements(duel, engine, side, uid):
-                    win_text += "\n" + m
-                self.duel_sessions.pop(sid)
-                yield event.image_result(img_path)
-                yield event.plain_result(win_text)
-            else:
-                engine.switch_turn()
-                # 太阴了：双方各 ≥20 次仍未分出胜负
-                gc = duel.get("guess_counts", {})
-                if gc.get(engine.a_id, 0) >= 20 and gc.get(engine.b_id, 0) >= 20:
-                    for p in (engine.a_id, engine.b_id):
-                        if self.pm.unlock_achievement(p, "too_dark", self._uid_name(p)):
-                            yield event.plain_result(self._achieve_msg(p, "too_dark"))
-                yield event.image_result(img_path)
-                yield event.plain_result(f"轮到 {engine.current_name()}。")
+            result = self._apply_duel_guess(duel, sid, uid, event.get_sender_name() or f"用户{uid}", clean)
+            if not result["ok"]:
+                yield event.plain_result(result["err"])
+                return
+            for kind, payload in result["msgs"]:
+                if kind == "text":
+                    yield event.plain_result(payload)
+                else:
+                    yield event.image_result(payload)
+            # bot 回合触发（若轮到 bot）
+            self._maybe_bot_duel_turn(duel, sid, event)
             return
 
     # ==========================================
@@ -1428,6 +1365,111 @@ class PoetryPlugin(Star):
         uname = self._uid_name(uid)
         return f"🏆 {uname} 达成成就「{name}」！"
 
+    def _apply_verse_guess(self, engine, session_id, uid, uname, clean):
+        """执行猜诗句猜测的核心逻辑（库校验 + 状态推进 + 结算 + 渲染）。返回结果 dict，不发送消息。
+
+        clean: 已去掉 cc 前缀的猜测文本。
+        返回 {"ok", "err", "comp", "all_correct", "finished", "msgs": [(kind, payload)]}
+        """
+        msgs = []
+        hanzi = re.sub(r'[^\u4e00-\u9fff]', '', clean)
+
+        def _fail(err):
+            return {"ok": False, "err": err, "comp": None, "all_correct": False,
+                    "finished": False, "msgs": msgs}
+
+        if not hanzi or len(hanzi) != len(engine.target_hanzi):
+            return _fail(f"答案 {len(engine.target_hanzi)} 个字，当前 {len(hanzi)} 字。请输入「cc 诗句」。")
+        ok_fmt, fmt_msg = engine.check_format(clean)
+        if not ok_fmt:
+            return _fail(fmt_msg or "格式不正确。")
+        # 判在不在总库中
+        if extract_punct(clean):
+            segs = re.split(r'[，。！？、；：]', clean)
+            segs = [re.sub(r'[^\u4e00-\u9fff]', '', s) for s in segs if re.sub(r'[^\u4e00-\u9fff]', '', s)]
+            if len(segs) != 2 or not self.db or not self.db.is_adjacent_pair(segs[0], segs[1]):
+                return _fail(f"「{clean}」未在诗词库中（需为库中相邻两句）。")
+        else:
+            if not self._is_in_library(clean):
+                return _fail(f"「{clean}」不在诗词库中，请输入曲库诗句。")
+        # 记录参与者与单局个人猜测次数
+        if not hasattr(engine, "participants"):
+            engine.participants = set()
+            engine.user_guesses = {}
+            engine.user_verses = set()
+            engine.user_initials = {}
+            engine.user_finals = {}
+        engine.participants.add(uid)
+        engine.user_guesses[uid] = engine.user_guesses.get(uid, 0) + 1
+        # 🐖 重复诗句检测（本局内任意玩家发过即算重复）
+        if hanzi in engine.user_verses:
+            pig_count = self.pm.add_pig(uid, uname)
+            msgs.append(("text", f"🐖 {uname} 重复诗句！猪+1（{'🐖' * pig_count}）"))
+        else:
+            engine.user_verses.add(hanzi)
+        # 记录诗句到个人数据
+        self.pm.record_verse(uid, clean, uname)
+        self.pm.inc_stat(uid, "total_guesses", 1, uname)
+        # 检查个人/特殊成就
+        for a in self.pm.check_verse_achievements(uid, uname):
+            msgs.append(("text", f"🏆 {uname} 达成成就「{ACHIEVEMENTS.get(a, (a,''))[0]}」！"))
+        ok, err, comp, all_correct = engine.guess(clean)
+        if not ok:
+            return _fail(err)
+        # 追踪本局声母/韵母使用
+        engine.user_initials.setdefault(uid, set())
+        engine.user_finals.setdefault(uid, set())
+        guess_parts = engine.history[-1][1] if engine.history else []
+        for gp in guess_parts:
+            if gp.get("initial"):
+                engine.user_initials[uid].add(gp["initial"])
+            if gp.get("final"):
+                engine.user_finals[uid].add(gp["final"])
+        # 一事无成
+        if comp and all(
+            c is not None and c.get("char") == "absent"
+            and c.get("initial") == "absent" and c.get("final") == "absent"
+            for c in comp
+        ):
+            if self.pm.unlock_achievement(uid, "all_gray", uname):
+                msgs.append(("text", self._achieve_msg(uid, "all_gray")))
+        # 旗开得胜
+        if len(engine.history) == 1:
+            has_char = any(c is not None and c.get("char") in ("correct", "present") for c in comp)
+            has_pinyin = any(
+                c is not None and c.get("initial") in ("correct", "present")
+                and c.get("final") in ("correct", "present")
+                for c in comp
+            )
+            if has_char or has_pinyin:
+                if self.pm.unlock_achievement(uid, "first_hit_char", uname):
+                    msgs.append(("text", self._achieve_msg(uid, "first_hit_char")))
+        img_path = os.path.join(str(self.plugin_data_dir), f"verse_{session_id}.png")
+        render_grid(engine, img_path, max_attempts=None, hint_mode=engine.hint_mode)
+        msgs.append(("image", img_path))
+        finished = False
+        if all_correct:
+            ans_path = os.path.join(str(self.plugin_data_dir), f"verse_ans_{session_id}.png")
+            render_answer(engine, ans_path)
+            msgs.append(("image", ans_path))
+            n_participants = len(getattr(engine, "participants", set()))
+            msgs.append(("text", f"🎉 猜中了！{engine.target_text}\n（本局参与 {n_participants} 人）"))
+            for m in self._settle_guess_verse_achievements(engine, uid, uname):
+                msgs.append(("text", m))
+            self.guess_verse_sessions.pop(session_id, None)
+            finished = True
+        elif engine.is_finished():
+            ans_path = os.path.join(str(self.plugin_data_dir), f"verse_ans_{session_id}.png")
+            render_answer(engine, ans_path)
+            msgs.append(("image", ans_path))
+            msgs.append(("text", f"机会耗尽！正确诗句：{engine.target_text}"))
+            self.guess_verse_sessions.pop(session_id, None)
+            finished = True
+        else:
+            msgs.append(("text", f"继续猜！已猜 {len(engine.history)} 次（不限次数）"))
+        return {"ok": True, "err": None, "comp": comp, "all_correct": all_correct,
+                "finished": finished, "msgs": msgs}
+
     def _settle_guess_verse_achievements(self, engine, winner_uid, winner_name):
         """猜诗句猜中后结算所有参与者成就。返回提示消息列表。"""
         msgs = []
@@ -1681,6 +1723,302 @@ class PoetryPlugin(Star):
                 pass
         return msgs
 
+    def _apply_duel_guess(self, duel, sid, uid, uname, clean):
+        """执行对垒猜测的核心逻辑（库校验 + 状态推进 + 结算 + 渲染）。返回结果 dict，不发送消息。
+
+        clean: 已去掉 cc 前缀的猜测文本。
+        返回 {"ok", "err", "comp", "all_correct", "finished", "msgs": [(kind, payload)]}
+        kind ∈ "text"|"image"。
+        """
+        msgs = []
+        engine = duel["engine"]
+        hanzi = re.sub(r'[^\u4e00-\u9fff]', '', clean)
+        side = "a" if uid == engine.a_id else "b"
+        target_punct = engine.a_target_punct if side == "a" else engine.b_target_punct
+        target_len = len(engine.a_target_hanzi if side == "a" else engine.b_target_hanzi)
+
+        def _fail(err):
+            return {"ok": False, "err": err, "comp": None, "all_correct": False,
+                    "finished": False, "msgs": msgs}
+
+        if not hanzi or len(hanzi) != target_len:
+            return _fail(f"字数不符（需 {target_len} 字）")
+        # 库校验（两句需为库中相邻两句）
+        if target_punct:
+            segs = re.split(r'[，。！？、；：]', clean)
+            segs = [re.sub(r'[^\u4e00-\u9fff]', '', s) for s in segs if re.sub(r'[^\u4e00-\u9fff]', '', s)]
+            if len(segs) != 2 or not self.db or not self.db.is_adjacent_pair(segs[0], segs[1]):
+                return _fail(f"「{clean}」未在诗词库中（需为库中相邻两句）")
+        else:
+            if not self._is_in_library(clean):
+                return _fail(f"「{clean}」不在诗词库中，请输入曲库诗句")
+        ok, err, side, comp, all_correct = engine.guess(uid, clean)
+        if not ok:
+            return _fail(err)
+        # 记录猜测诗句到个人数据（仅合法猜测）
+        self.pm.record_verse(uid, clean, uname)
+        self.pm.inc_stat(uid, "total_guesses", 1, uname)
+        # 🐖 重复诗句检测（本局内自己发过的纯汉字）
+        if "user_verses" not in duel:
+            duel["user_verses"] = {}
+        duel["user_verses"].setdefault(uid, set())
+        if hanzi in duel["user_verses"][uid]:
+            pig_count = self.pm.add_pig(uid, uname)
+            msgs.append(("text", f"🐖 {uname} 重复诗句！猪+1（{'🐖' * pig_count}）"))
+        else:
+            duel["user_verses"][uid].add(hanzi)
+        # 追踪对垒双方猜测次数
+        if "guess_counts" not in duel:
+            duel["guess_counts"] = {}
+        duel["guess_counts"][uid] = duel["guess_counts"].get(uid, 0) + 1
+        # 追踪本局声母/韵母使用
+        if "user_initials" not in duel:
+            duel["user_initials"] = {}
+            duel["user_finals"] = {}
+        duel["user_initials"].setdefault(uid, set())
+        duel["user_finals"].setdefault(uid, set())
+        side_parts = []
+        if side == "a" and engine.a_history:
+            side_parts = engine.a_history[-1][1]
+        elif side == "b" and engine.b_history:
+            side_parts = engine.b_history[-1][1]
+        for gp in side_parts:
+            if gp.get("initial"):
+                duel["user_initials"][uid].add(gp["initial"])
+            if gp.get("final"):
+                duel["user_finals"][uid].add(gp["final"])
+        # 一事无成
+        if comp and all(
+            c is not None and c.get("char") == "absent"
+            and c.get("initial") == "absent" and c.get("final") == "absent"
+            for c in comp
+        ):
+            if self.pm.unlock_achievement(uid, "all_gray", uname):
+                msgs.append(("text", self._achieve_msg(uid, "all_gray")))
+        # 旗开得胜
+        if len(engine.a_history) + len(engine.b_history) == 1:
+            has_char = any(c is not None and c.get("char") in ("correct", "present") for c in comp)
+            has_pinyin = any(
+                c is not None and c.get("initial") in ("correct", "present")
+                and c.get("final") in ("correct", "present")
+                for c in comp
+            )
+            if has_char or has_pinyin:
+                if self.pm.unlock_achievement(uid, "first_hit_char", uname):
+                    msgs.append(("text", self._achieve_msg(uid, "first_hit_char")))
+        img_path = os.path.join(str(self.plugin_data_dir), f"duel_{sid}.png")
+        render_duel(engine, img_path, hint_mode=duel.get("hint_mode", "pinyin"))
+        msgs.append(("image", img_path))
+        finished = False
+        if all_correct:
+            wname = engine.side_name(side)
+            win_text = (
+                f"🏆 {wname} 猜中了对方的诗句！\n"
+                f"{engine.a_name} 的题：{engine.a_puzzle}\n"
+                f"{engine.b_name} 的题：{engine.b_puzzle}"
+            )
+            for m in self._settle_duel_achievements(duel, engine, side, uid):
+                win_text += "\n" + m
+            msgs.append(("text", win_text))
+            self.duel_sessions.pop(sid, None)
+            finished = True
+        else:
+            engine.switch_turn()
+            gc = duel.get("guess_counts", {})
+            if gc.get(engine.a_id, 0) >= 20 and gc.get(engine.b_id, 0) >= 20:
+                for p in (engine.a_id, engine.b_id):
+                    if self.pm.unlock_achievement(p, "too_dark", self._uid_name(p)):
+                        msgs.append(("text", self._achieve_msg(p, "too_dark")))
+            msgs.append(("text", f"轮到 {engine.current_name()}。"))
+        return {"ok": True, "err": None, "comp": comp, "all_correct": all_correct,
+                "finished": finished, "msgs": msgs}
+
+    def _maybe_bot_duel_turn(self, duel, sid, event=None):
+        """对垒猜测后，若轮到 bot 且未结束，触发 bot 思考并猜测。"""
+        if not self.ai_bot.enabled:
+            return
+        engine = duel.get("engine")
+        if not engine:
+            return
+        if not engine.is_turn(BOT_ID):
+            return
+        if duel.get("bot_thinking"):
+            return
+        duel["bot_thinking"] = True
+        origin = duel.get("group_origin")
+        asyncio.create_task(self._bot_duel_think(duel, sid, origin, event))
+
+    async def _bot_duel_think(self, duel, sid, origin, event=None):
+        """bot 思考并提交对垒猜测，随后发消息到群。"""
+        try:
+            engine = duel.get("engine")
+            if not engine:
+                return
+            guess, speech = await self.ai_bot.think_and_guess_duel(duel, engine, event)
+            if not guess:
+                if origin and speech:
+                    await self.context.send_message(origin, MessageChain([Plain(speech)]))
+                return
+            result = self._apply_duel_guess(duel, sid, BOT_ID, self.ai_bot.bot_name, guess)
+            if origin:
+                if speech:
+                    await self.context.send_message(origin, MessageChain([Plain(speech)]))
+                for kind, payload in result["msgs"]:
+                    if kind == "text":
+                        await self.context.send_message(origin, MessageChain([Plain(payload)]))
+                    else:
+                        await self.context.send_message(origin, MessageChain([Image.fromFileSystem(payload)]))
+        except Exception as e:
+            logger.error(f"[ai_bot] 对垒 bot 思考失败: {e}")
+            if origin:
+                try:
+                    await self.context.send_message(origin, MessageChain([Plain("（AI 思考出错了，跳过本回合）")]))
+                except Exception:
+                    pass
+        finally:
+            duel["bot_thinking"] = False
+
+    def _start_duel_playing(self, duel, sid):
+        """双方出题完成，进入互猜阶段。群通知 + 成就消息主动发送。返回 engine。"""
+        a_id = duel["challenger_id"]
+        b_id = duel["opponent_id"]
+        engine = DuelVerseEngine(
+            duel["puzzles"][a_id], duel["puzzles"][b_id],
+            a_id, duel["challenger_name"], b_id, duel["opponent_name"],
+        )
+        duel["engine"] = engine
+        duel["state"] = "playing"
+        soulmate_msgs = self._check_soulmate(duel, a_id, b_id)
+        puzzle_msgs = self._check_duel_puzzle_achievements(duel, a_id, b_id)
+        origin = duel.get("group_origin")
+        if origin:
+            lines = [
+                "🍵 双方已出题！开始互猜！",
+                f"{duel['challenger_name']} 猜 {duel['opponent_name']} 的题，{duel['opponent_name']} 猜 {duel['challenger_name']} 的题。",
+                f"先轮到：{engine.current_name()}（发送「cc 诗句」猜测）",
+            ]
+            lines += soulmate_msgs + puzzle_msgs
+            try:
+                asyncio.create_task(self.context.send_message(origin, MessageChain([Plain("\n".join(lines))])))
+            except Exception as e:
+                logger.error(f"[duel] 群通知发送失败: {e}")
+        return engine
+
+    async def _bot_do_puzzle(self, sid, fmt, event=None):
+        """bot 出题（对垒）。出题后校验格式与库，双方都出题则进入 playing。"""
+        try:
+            duel = self.duel_sessions.get(sid)
+            if not duel:
+                return
+            puzzle = await self.ai_bot.think_puzzle(fmt, event)
+            if puzzle:
+                hanzi = re.sub(r'[^\u4e00-\u9fff]', '', puzzle)
+                if fmt[0] == "single":
+                    if len(hanzi) != fmt[1] or not self._is_in_library(puzzle):
+                        puzzle = None
+                else:
+                    a_len, b_len = fmt[1]
+                    segs = re.split(r'[，。！？、；：]', puzzle)
+                    segs = [re.sub(r'[^\u4e00-\u9fff]', '', s) for s in segs if re.sub(r'[^\u4e00-\u9fff]', '', s)]
+                    if len(segs) != 2 or len(segs[0]) != a_len or len(segs[1]) != b_len or not self.db or not self.db.is_adjacent_pair(segs[0], segs[1]):
+                        puzzle = None
+            if not puzzle:
+                # fallback 总库随机
+                try:
+                    if fmt[0] == "single":
+                        cands = self.db.get_random_verse(fmt[1], fmt[1], target_count=10)
+                    else:
+                        cands = self.db.get_random_verse_by_combo(fmt[1][0], fmt[1][1], target_count=10)
+                    if cands:
+                        import random as _r
+                        puzzle = _r.choice(cands)[0]
+                except Exception:
+                    puzzle = None
+            if not puzzle:
+                logger.error("[ai_bot] bot 出题失败，无可用诗句")
+                return
+            duel = self.duel_sessions.get(sid)
+            if not duel:
+                return
+            duel["puzzles"][BOT_ID] = puzzle
+            duel["puzzle_done"].add(BOT_ID)
+            self.pm.record_verse(BOT_ID, puzzle, self.ai_bot.bot_name)
+            if len(duel["puzzle_done"]) >= 2:
+                engine = self._start_duel_playing(duel, sid)
+                if engine and engine.is_turn(BOT_ID):
+                    self._maybe_bot_duel_turn(duel, sid, event)
+        except Exception as e:
+            logger.error(f"[ai_bot] bot 出题异常: {e}")
+
+    # ============ 猜诗句 bot 帮猜 ============
+
+    def _bot_self_id(self, event):
+        try:
+            return str(getattr(getattr(event, "message_obj", None), "self_id", "") or "")
+        except Exception:
+            return ""
+
+    def _is_at_bot(self, event):
+        """判断消息是否 @ 了机器人自身。"""
+        at_id = self._extract_at_id(event)
+        if not at_id:
+            return False
+        self_id = self._bot_self_id(event)
+        return bool(self_id) and at_id == self_id
+
+    def _is_bot_trigger(self, event, msg_raw):
+        """判断是否触发猜诗句 bot 帮猜（@机器人 或自定义触发词）。"""
+        if self._is_at_bot(event):
+            return True
+        for w in self._ai_bot_trigger_words:
+            if w and w in msg_raw:
+                return True
+        return False
+
+    def _try_bot_verse_guess(self, event, session_id):
+        """触发猜诗句 bot 猜一句（含冷却锁）。返回 True 表示已处理（阻断后续）。"""
+        engine = self.guess_verse_sessions.get(session_id)
+        if not engine:
+            return False
+        # 冷却检查
+        now = time.time()
+        if now < self._ai_bot_cooldown_until:
+            return False
+        if getattr(engine, "bot_thinking", False):
+            return True
+        engine.bot_thinking = True
+        self._ai_bot_cooldown_until = now + self.ai_bot.cooldown
+        origin = getattr(event, "unified_msg_origin", None)
+        asyncio.create_task(self._bot_verse_think(engine, session_id, origin, event))
+        return True
+
+    async def _bot_verse_think(self, engine, session_id, origin, event=None):
+        """bot 思考并提交猜诗句猜测，随后发消息到群。"""
+        try:
+            guess, speech = await self.ai_bot.think_and_guess_verse(engine, session_id, event)
+            if not guess:
+                if origin and speech:
+                    await self.context.send_message(origin, MessageChain([Plain(speech)]))
+                return
+            result = self._apply_verse_guess(engine, session_id, BOT_ID, self.ai_bot.bot_name, guess)
+            if origin:
+                if speech:
+                    await self.context.send_message(origin, MessageChain([Plain(speech)]))
+                for kind, payload in result["msgs"]:
+                    if kind == "text":
+                        await self.context.send_message(origin, MessageChain([Plain(payload)]))
+                    else:
+                        await self.context.send_message(origin, MessageChain([Image.fromFileSystem(payload)]))
+        except Exception as e:
+            logger.error(f"[ai_bot] 猜诗句 bot 思考失败: {e}")
+            if origin:
+                try:
+                    await self.context.send_message(origin, MessageChain([Plain("（AI 思考出错了）")]))
+                except Exception:
+                    pass
+        finally:
+            engine.bot_thinking = False
+
     def _poem_titles_of(self, text):
         """返回包含该诗句（分句）的所有诗词标题。"""
         titles = []
@@ -1798,6 +2136,12 @@ class PoetryPlugin(Star):
                     yield event.plain_result(f"轮到 {engine.current_name()}。")
                 return
 
+        # 🤖 AI bot 帮猜（@机器人 或自定义触发词）
+        if self.ai_bot.enabled and session_id in self.guess_verse_sessions:
+            if self._is_bot_trigger(event, msg_raw):
+                if self._try_bot_verse_guess(event, session_id):
+                    return
+
         # 🎯 猜诗句游戏处理
         if session_id in self.guess_verse_sessions:
             engine = self.guess_verse_sessions[session_id]
@@ -1814,106 +2158,17 @@ class PoetryPlugin(Star):
             if not msg_raw.startswith("cc"):
                 return
             clean = re.sub(r'^cc\s*', '', msg_raw).strip()
-            hanzi = re.sub(r'[^\u4e00-\u9fff]', '', clean)
-            if not hanzi or len(hanzi) != len(engine.target_hanzi):
-                yield event.plain_result(f"答案 {len(engine.target_hanzi)} 个字，当前 {len(hanzi)} 字。请输入「cc 诗句」。")
-                return
-            # 判格式（单句需无标点；两句需带标点且分句字数匹配）
-            ok_fmt, fmt_msg = engine.check_format(clean)
-            if not ok_fmt:
-                yield event.plain_result(fmt_msg or "格式不正确。")
-                return
-            # 判在不在总库中（两句需是库中相邻两句）
-            if extract_punct(clean):
-                # 两句：按标点切分，校验相邻
-                segs = re.split(r'[，。！？、；：]', clean)
-                segs = [re.sub(r'[^\u4e00-\u9fff]', '', s) for s in segs if re.sub(r'[^\u4e00-\u9fff]', '', s)]
-                if len(segs) != 2 or not self.db or not self.db.is_adjacent_pair(segs[0], segs[1]):
-                    yield event.plain_result(f"「{clean}」未在诗词库中（需为库中相邻两句）。")
-                    return
-            else:
-                if not self._is_in_library(clean):
-                    yield event.plain_result(f"「{clean}」不在诗词库中，请输入曲库诗句。")
-                    return
             uid = str(event.get_sender_id())
             uname = event.get_sender_name() or f"用户{uid}"
-            # 记录参与者与单局个人猜测次数
-            if not hasattr(engine, "participants"):
-                engine.participants = set()
-                engine.user_guesses = {}
-                engine.user_verses = set()
-                engine.user_initials = {}
-                engine.user_finals = {}
-            engine.participants.add(uid)
-            engine.user_guesses[uid] = engine.user_guesses.get(uid, 0) + 1
-            # 🐖 重复诗句检测（本局内任意玩家发过即算重复）
-            if hanzi in engine.user_verses:
-                pig_count = self.pm.add_pig(uid, uname)
-                yield event.plain_result(f"🐖 {uname} 重复诗句！猪+1（{'🐖' * pig_count}）")
-            else:
-                engine.user_verses.add(hanzi)
-            # 记录诗句到个人数据
-            self.pm.record_verse(uid, clean, uname)
-            self.pm.inc_stat(uid, "total_guesses", 1, uname)
-            # 检查个人/特殊成就
-            for a in self.pm.check_verse_achievements(uid, uname):
-                yield event.plain_result(f"🏆 {uname} 达成成就「{ACHIEVEMENTS.get(a, (a,''))[0]}」！")
-            ok, err, comp, all_correct = engine.guess(clean)
-            if not ok:
-                # 不合规的猜测静默忽略，不回复，不占次数
+            result = self._apply_verse_guess(engine, session_id, uid, uname, clean)
+            if not result["ok"]:
+                yield event.plain_result(result["err"])
                 return
-            # 追踪本局声母/韵母使用（供 于无声处听惊雷 / 绕梁余韵）
-            engine.user_initials.setdefault(uid, set())
-            engine.user_finals.setdefault(uid, set())
-            guess_parts = engine.history[-1][1] if engine.history else []
-            for gp in guess_parts:
-                if gp.get("initial"):
-                    engine.user_initials[uid].add(gp["initial"])
-                if gp.get("final"):
-                    engine.user_finals[uid].add(gp["final"])
-            # 一事无成：一次猜测每个格子全灰（字/声母/韵母 均 absent，声调不参与判定）
-            if comp and all(
-                c is not None and c.get("char") == "absent"
-                and c.get("initial") == "absent" and c.get("final") == "absent"
-                for c in comp
-            ):
-                if self.pm.unlock_achievement(uid, "all_gray", uname):
-                    yield event.plain_result(self._achieve_msg(uid, "all_gray"))
-            # 旗开得胜：开局首句（本局第1条合法猜测），出现存在的字或完整拼音
-            if len(engine.history) == 1:
-                has_char = any(c is not None and c.get("char") in ("correct", "present") for c in comp)
-                has_pinyin = any(
-                    c is not None and c.get("initial") in ("correct", "present")
-                    and c.get("final") in ("correct", "present")
-                    for c in comp
-                )
-                if has_char or has_pinyin:
-                    if self.pm.unlock_achievement(uid, "first_hit_char", uname):
-                        yield event.plain_result(self._achieve_msg(uid, "first_hit_char"))
-            img_path = os.path.join(str(self.plugin_data_dir), f"verse_{session_id}.png")
-            render_grid(engine, img_path, max_attempts=None, hint_mode=engine.hint_mode)
-            yield event.image_result(img_path)
-
-            if all_correct:
-                ans_path = os.path.join(str(self.plugin_data_dir), f"verse_ans_{session_id}.png")
-                render_answer(engine, ans_path)
-                yield event.image_result(ans_path)
-                n_participants = len(getattr(engine, "participants", set()))
-                yield event.plain_result(f"🎉 猜中了！{engine.target_text}\n（本局参与 {n_participants} 人）")
-                # ===== 猜诗句成就结算 =====
-                for msg in self._settle_guess_verse_achievements(engine, uid, uname):
-                    yield event.plain_result(msg)
-                del self.guess_verse_sessions[session_id]
-                if os.path.exists(img_path): os.remove(img_path)
-            elif engine.is_finished():
-                ans_path = os.path.join(str(self.plugin_data_dir), f"verse_ans_{session_id}.png")
-                render_answer(engine, ans_path)
-                yield event.image_result(ans_path)
-                yield event.plain_result(f"机会耗尽！正确诗句：{engine.target_text}")
-                del self.guess_verse_sessions[session_id]
-                if os.path.exists(img_path): os.remove(img_path)
-            else:
-                yield event.plain_result(f"继续猜！已猜 {len(engine.history)} 次（不限次数）")
+            for kind, payload in result["msgs"]:
+                if kind == "text":
+                    yield event.plain_result(payload)
+                else:
+                    yield event.image_result(payload)
             return
 
         if session_id not in self.active_games: return

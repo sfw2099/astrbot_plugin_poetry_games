@@ -198,3 +198,45 @@ class PoetryDB:
         except Exception:
             return False
         return False
+
+    def search_by_chars_and_len(self, include_chars, length, exclude_chars=None, limit=200):
+        """按「包含字 + 单句字数」粗筛候选诗句。
+
+        include_chars: 每字都必须在句中出现的字列表（非空）。
+        length: 单句字数（拆句后精确匹配）。
+        exclude_chars: 排除含这些字的候选（可选）。
+        返回 [(句子, title, author, dynasty)]。
+        """
+        include = [re.sub(r'[^\u4e00-\u9fa5]', '', c) for c in (include_chars or [])]
+        include = [c for c in include if c]
+        if not include:
+            return []
+        excl = set(re.sub(r'[^\u4e00-\u9fa5]', '', c) for c in (exclude_chars or []))
+        excl.discard('')
+        where = []
+        params = []
+        for c in include:
+            where.append("content LIKE ?")
+            params.append(f'%{c}%')
+        query = "SELECT title, author, dynasty, content FROM poems WHERE " + " AND ".join(where) + " LIMIT 500"
+        candidates = []
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute(query, params)
+                for title, author, dynasty, content in cursor.fetchall():
+                    sentences = re.split(r'[，。！？\n\r\s、；：]+', content)
+                    for s in sentences:
+                        pure = re.sub(r'[^\u4e00-\u9fa5]', '', s)
+                        if length and len(pure) != length:
+                            continue
+                        if not include or not all(ch in pure for ch in include):
+                            continue
+                        if excl and any(ch in pure for ch in excl):
+                            continue
+                        candidates.append((pure, title, author, dynasty))
+                        if len(candidates) >= limit:
+                            return candidates
+        except Exception:
+            pass
+        return candidates
