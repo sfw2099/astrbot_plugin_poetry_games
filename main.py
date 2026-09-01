@@ -1009,6 +1009,8 @@ class PoetryPlugin(Star):
                 duel["state"] = "playing"
                 # 心有灵犀：双方题同属一首诗
                 soulmate_msgs = self._check_soulmate(duel, a_id, b_id)
+                # 对垒出题关系成就：作者/朝代/相同字/月花酒山江
+                puzzle_msgs = self._check_duel_puzzle_achievements(duel, a_id, b_id)
                 origin = duel.get("group_origin")
                 if origin:
                     try:
@@ -1019,6 +1021,8 @@ class PoetryPlugin(Star):
                     except Exception as e:
                         logger.error(f"[duel] 群通知发送失败: {e}")
                 for m in soulmate_msgs:
+                    yield event.plain_result(m)
+                for m in puzzle_msgs:
                     yield event.plain_result(m)
             yield event.plain_result(f"✅ 出题成功！题目：{clean}。等待对方出题...")
             return
@@ -1629,6 +1633,52 @@ class PoetryPlugin(Star):
                         msgs.append(self._achieve_msg(p, "soulmate"))
         except Exception:
             pass
+        return msgs
+
+    def _check_duel_puzzle_achievements(self, duel, a_id, b_id):
+        """对垒出题关系成就：双方题目的作者/朝代/相同字/月花酒山江。返回提示消息列表。"""
+        msgs = []
+        a_puzzle = duel.get("puzzles", {}).get(a_id, "")
+        b_puzzle = duel.get("puzzles", {}).get(b_id, "")
+        if not a_puzzle or not b_puzzle:
+            return msgs
+        a_hanzi = set(extract_hanzi(a_puzzle))
+        b_hanzi = set(extract_hanzi(b_puzzle))
+        # 相同汉字（一字之缘）
+        if a_hanzi & b_hanzi:
+            for p in (a_id, b_id):
+                if self.pm.unlock_achievement(p, "duel_common_char", self._uid_name(p)):
+                    msgs.append(self._achieve_msg(p, "duel_common_char"))
+        # 月/花/酒/山/江：双方都含该字
+        both_char_map = {
+            "月": "duel_both_moon", "花": "duel_both_flower", "酒": "duel_both_wine",
+            "山": "duel_both_mountain", "江": "duel_both_river",
+        }
+        for ch, ach in both_char_map.items():
+            if ch in a_hanzi and ch in b_hanzi:
+                for p in (a_id, b_id):
+                    if self.pm.unlock_achievement(p, ach, self._uid_name(p)):
+                        msgs.append(self._achieve_msg(p, ach))
+        # 作者/朝代
+        if self.db:
+            try:
+                meta_a = self.db.check_exact_poetry(a_puzzle)  # (title, author, dynasty)
+                meta_b = self.db.check_exact_poetry(b_puzzle)
+                if meta_a and meta_b:
+                    _, author_a, dynasty_a = meta_a
+                    _, author_b, dynasty_b = meta_b
+                    # 同作者：排除佚名/空
+                    if author_a and author_b and author_a != "佚名" and author_b != "佚名" and author_a == author_b:
+                        for p in (a_id, b_id):
+                            if self.pm.unlock_achievement(p, "duel_same_author", self._uid_name(p)):
+                                msgs.append(self._achieve_msg(p, "duel_same_author"))
+                    # 同朝代：非空且相等
+                    if dynasty_a and dynasty_b and dynasty_a == dynasty_b:
+                        for p in (a_id, b_id):
+                            if self.pm.unlock_achievement(p, "duel_same_dynasty", self._uid_name(p)):
+                                msgs.append(self._achieve_msg(p, "duel_same_dynasty"))
+            except Exception:
+                pass
         return msgs
 
     def _poem_titles_of(self, text):
