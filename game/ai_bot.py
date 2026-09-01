@@ -12,7 +12,7 @@ import random
 
 from .base_game import BOT_ID, BOT_NAME
 from .guess_verse import extract_hanzi
-from .search import search_verses_candidates
+from .search import search_verses_candidates, parse_search_query
 from .bot_utils import (
     build_verse_state_text, build_duel_state_text, parse_guess_from_speech,
 )
@@ -41,24 +41,26 @@ except Exception:
 
 SYSTEM_PROMPT = """你是诗词游戏玩家「{bot_name}」。你在和群友玩诗词游戏（猜诗句 / 诗词对垒）。
 
-你的任务：通过工具获取局势、检索诗句，最终用 submit_guess 工具提交一次猜测。
+你的任务：通过工具获取局势、检索诗句，最终用 submit_guess 工具提交猜测。
 
 可用工具：
 - get_verse_state：查看「猜诗句」当前局势与已猜反馈
 - get_duel_state：查看「诗词对垒」当前局势与双方反馈
-- search_verses：按字/字数/声母/韵母检索候选诗句
+- search_verses：按自然语言检索候选诗句
 - get_pinyin_hint：查看拼音模式下的声母韵母提示
 - submit_guess：提交你的猜测（必须调用！）
 
-流程（严格遵守）：
-1. 用 get_verse_state 或 get_duel_state 了解局势和每格反馈。
-2. 根据反馈（绿字位置固定、橙字保留、灰字排除）用 search_verses 检索候选。
-3. 从候选中选出最可能的一句，调用 submit_guess(text=该诗句) 提交猜测。
-4. submit_guess 会返回反馈。若未猜中，可继续检索并再次 submit_guess，直到猜中或信息不足。
+检索策略（search_verses 用自然语言描述，如「第3个字是烟、第5个字声母j的7字诗句」）：
+- 绿字（字和位置都对）→ 用「第N个字是X」检索
+- 橙字（字对但位置错）→ 用「包含X」检索
+- 声母/韵母对 → 用「第N个字声母X」「第N个字韵母X」检索
+- 不确定时放宽条件，不要一次叠加太多约束
 
-注意：
+重要：
+- 你本身就懂大量诗词，可凭反馈直接猜，不必依赖检索。
+- 最多检索 2 次，然后必须调用 submit_guess 提交一个合理猜测（即使不确定，猜错会得到反馈）。
 - 不要用文本格式「猜：XXX」，一律通过 submit_guess 工具提交。
-- 最终可以输出一句简短自然的发言（不超过 30 字），但不要提及工具或原始数据。
+- 最终可输出一句简短自然发言（≤30字），不要提及工具或原始数据。
 """
 
 
@@ -95,29 +97,18 @@ if _ASTRBOT_OK:
     @dataclass
     class SearchVersesTool(FunctionTool[AstrAgentContext]):
         name: str = "search_verses"
-        description: str = "按字/字数/声母/韵母检索候选诗句。"
+        description: str = "按自然语言描述检索候选诗句。例如「第3个字是烟、第5个字声母j的7字诗句」「包含明月、不含风雨、5字」。"
         parameters: dict = Field(default_factory=lambda: {
             "type": "object",
             "properties": {
-                "include": {"type": "array", "description": "必须包含的字列表", "items": {"type": "string"}},
-                "exclude": {"type": "array", "description": "必须排除的字列表", "items": {"type": "string"}},
-                "length": {"type": "number", "description": "单句字数"},
-                "initials": {"type": "array", "description": "必须包含的声母列表", "items": {"type": "string"}},
-                "finals": {"type": "array", "description": "必须包含的韵母列表", "items": {"type": "string"}},
-                "session_id": {"type": "string", "description": "会话ID，可留空"},
+                "query": {"type": "string", "description": "自然语言检索条件，如：第3个字是烟 / 第5个字声母j / 包含明月 / 不含风雨 / 7字"},
             },
+            "required": ["query"],
         })
         bot: object = None
 
         async def call(self, context: ContextWrapper[AstrAgentContext], **kwargs) -> ToolExecResult:
-            return self.bot.search_verses(
-                session_id=kwargs.get("session_id", ""),
-                include=kwargs.get("include"),
-                exclude=kwargs.get("exclude"),
-                length=kwargs.get("length"),
-                initials=kwargs.get("initials"),
-                finals=kwargs.get("finals"),
-            )
+            return self.bot.search_verses(kwargs.get("query", ""))
 
     @dataclass
     class GetPinyinHintTool(FunctionTool[AstrAgentContext]):
@@ -164,6 +155,7 @@ class BotPlayer:
         self.cooldown = cooldown
         self.puzzle_ai_ratio = puzzle_ai_ratio
         self._origin = None
+        self._common_chars_cache = None
 
     # ============ 工具实现（供 FunctionTool.call 委托） ============
 
@@ -196,20 +188,35 @@ class BotPlayer:
         side = "a" if str(engine.a_id) == BOT_ID else "b"
         return build_duel_state_text(engine, side)
 
-    def search_verses(self, session_id="", include=None, exclude=None, length=None,
-                      initials=None, finals=None):
+    def search_verses(self, query=""):
         if not getattr(self.plugin, "db", None):
             return "数据库未安装。"
+        cond = parse_search_query(query)
         cands = search_verses_candidates(
-            self.plugin.db, include=include, exclude=exclude, length=length,
-            initials=initials, finals=finals, limit=20,
+            self.plugin.db,
+            include=cond["include"], exclude=cond["exclude"], length=cond["length"],
+            initials=cond["initials"], finals=cond["finals"],
+            char_positions=cond["char_positions"],
+            initial_positions=cond["initial_positions"],
+            final_positions=cond["final_positions"],
+            common_chars=self._common_chars(),
+            limit=20,
         )
         if not cands:
-            return "未找到符合条件的候选诗句。"
+            return "未找到符合条件的候选诗句，可放宽条件（减少排除字或去掉部分约束）再试。"
         lines = [f"共 {len(cands)} 条候选："]
         for c in cands:
             lines.append(f"{c['text']}（{c['title']}·{c['author']}·{c['dynasty']}）")
         return "\n".join(lines)
+
+    def _common_chars(self):
+        """经典曲库中出现过的单字集合（用于无位置约束时优先返回常见字诗句）。"""
+        if getattr(self, "_common_chars_cache", None) is None:
+            chars = set()
+            for p in getattr(self.plugin, "classic_poems", []) or []:
+                chars.update(extract_hanzi(p.get("sentence", "") or ""))
+            self._common_chars_cache = chars
+        return self._common_chars_cache
 
     def get_pinyin_hint(self, session_id=""):
         sessions = getattr(self.plugin, "guess_verse_sessions", {})
@@ -326,7 +333,7 @@ class BotPlayer:
                 prompt=prompt,
                 system_prompt=SYSTEM_PROMPT.format(bot_name=self.bot_name),
                 tools=ToolSet(tools),
-                max_steps=8,
+                max_steps=6,
                 tool_call_timeout=30,
             )
             return resp.completion_text
@@ -358,7 +365,8 @@ class BotPlayer:
         tools = self._build_tools(include_verse=True, include_duel=False)
         speech = await self._run_agent(event, tools, prompt) if tools else None
         if not speech:
-            cands = search_verses_candidates(self.plugin.db, length=len(engine.target_hanzi), limit=20)
+            cands = search_verses_candidates(self.plugin.db, length=len(engine.target_hanzi),
+                                             common_chars=self._common_chars(), limit=20)
             cand_text = "\n".join(c["text"] for c in cands)
             speech = await self._run_fallback(event, cand_text, prompt)
         if not speech:
@@ -374,7 +382,8 @@ class BotPlayer:
         speech = await self._run_agent(event, tools, prompt) if tools else None
         if not speech:
             my_target = engine.a_target_hanzi if side == "a" else engine.b_target_hanzi
-            cands = search_verses_candidates(self.plugin.db, length=len(my_target), limit=20)
+            cands = search_verses_candidates(self.plugin.db, length=len(my_target),
+                                             common_chars=self._common_chars(), limit=20)
             cand_text = "\n".join(c["text"] for c in cands)
             speech = await self._run_fallback(event, cand_text, prompt)
         if not speech:

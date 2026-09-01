@@ -33,7 +33,7 @@ def comp_to_text(guess_text, comp):
 
 
 def build_verse_state_text(engine, session_id=""):
-    """构建猜诗句局势文本（给 LLM 看）。"""
+    """构建猜诗句局势文本（给 LLM 看）。仅保留最近 5 次猜测反馈，避免 prompt 过长。"""
     lines = []
     target_len = len(getattr(engine, "target_hanzi", ""))
     fmt = engine.format_desc() if hasattr(engine, "format_desc") else f"{target_len} 字"
@@ -42,14 +42,14 @@ def build_verse_state_text(engine, session_id=""):
     lines.append(f"提示方式：{'拼音' if getattr(engine, 'hint_mode', 'pinyin') == 'pinyin' else '部首'}")
     history = getattr(engine, "history", [])
     lines.append(f"已猜 {len(history)} 次")
-    for idx, (text, parts, comp) in enumerate(history, 1):
+    for idx, (text, parts, comp) in enumerate(history[-5:], max(1, len(history) - 4)):
         lines.append(f"--- 第 {idx} 次「{text}」---")
         lines.append(comp_to_text(text, comp))
     return "\n".join(lines)
 
 
 def build_duel_state_text(engine, side):
-    """构建对垒局势文本（给 LLM 看）。side ∈ 'a'|'b'（bot 所在方）。"""
+    """构建对垒局势文本（给 LLM 看）。side ∈ 'a'|'b'（bot 所在方）。仅保留最近 5 次我方反馈。"""
     lines = []
     my_target = engine.a_target_hanzi if side == "a" else engine.b_target_hanzi
     my_punct = engine.a_target_punct if side == "a" else engine.b_target_punct
@@ -59,7 +59,7 @@ def build_duel_state_text(engine, side):
         lines.append(f"目标格式：{engine.format_desc(side)}")
     my_history = engine.a_history if side == "a" else engine.b_history
     lines.append(f"我方已猜 {len(my_history)} 次")
-    for idx, (text, parts, comp) in enumerate(my_history, 1):
+    for idx, (text, parts, comp) in enumerate(my_history[-5:], max(1, len(my_history) - 4)):
         lines.append(f"--- 我方第 {idx} 次「{text}」---")
         lines.append(comp_to_text(text, comp))
     opp_side = "b" if side == "a" else "a"
