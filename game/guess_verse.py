@@ -152,7 +152,7 @@ def _ensure_pypinyin():
 
 # pypinyin 韵母变体 -> 教学标准形式
 _FINAL_ALIAS = {
-    "v": "ü", "ve": "üe", "vn": "ün",   # ü 系列
+    "v": "ü", "ve": "üe", "vn": "ün", "van": "üan",   # ü 系列（pypinyin 用 v 表示 ü）
     "iou": "iu", "uei": "ui", "uen": "un",  # 省写还原
 }
 
