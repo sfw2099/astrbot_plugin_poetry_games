@@ -1639,3 +1639,159 @@ def render_achievements(uid, uname, achs, output_path):
 
     img.save(output_path, "PNG")
     return output_path
+
+
+def render_poetry_report(report, output_path):
+    """渲染个人诗句积累分析报表长图。
+
+    report: dict {
+      uname, total, uses, dup,
+      top_verses: [dict(text,count,author)],
+      top_authors: [dict(name,count)],
+      dynasties: [(name,count,pct)],
+      word_len: [(label,count)],
+      top_chars: [(char,count)],
+      unknown: int,
+    }
+    """
+    W = 900
+    PAD = 28
+    H1 = 70   # 标题
+    H2 = 90   # 摘要
+    RH = 40   # 行高
+    SEC = 50  # 区块标题间隔
+    tfont = _get_font(30)
+    sfont = _get_font(24)
+    afont = _get_font(20)
+    nfont = _get_font(17)
+
+    def sec_title(d, y, text):
+        d.text((PAD, y), text, fill=(40, 40, 40), font=sfont)
+        return y + 34
+
+    # ---- 行内容高度估算（先收集各区块行数）----
+    nv = min(8, len(report.get('top_verses', [])))
+    na = min(8, len(report.get('top_authors', [])))
+    dyn = report.get('dynasties', [])
+    wl = report.get('word_len', [])
+    tc = report.get('top_chars', [])[:10]
+    H = (PAD + H1 + H2 + SEC
+         + (34 + nv * RH if nv else 0)
+         + SEC + (34 + na * RH if na else 0)
+         + SEC + (34 + len(dyn) * RH if dyn else 0)
+         + SEC + (34 + (len(wl) or 1) * RH)
+         + SEC + (34 + ((len(tc) + 4) // 5) * RH)
+         + PAD)
+    img = Image.new('RGB', (W, H), (250, 250, 252))
+    d = ImageDraw.Draw(img)
+    d.rectangle([0, 0, W, H], fill=(250, 250, 252))
+
+    # 标题
+    d.text((W // 2, 16), f"诗句积累分析报表", fill=(30, 30, 30), font=_get_font(34), anchor='mt')
+    d.text((W // 2, 52), f"{report.get('uname','')} · 生成于" , fill=(120,120,120), font=nfont, anchor='mt')
+
+    y = PAD + H1
+    # 摘要格子
+    import time as _t
+    now = _t.strftime('%Y-%m-%d %H:%M')
+    d.text((W // 2, 66), f"{report.get('uname','')} · {now}", fill=(120,120,120), font=nfont, anchor='mt')
+    y = PAD + H1
+    metrics = [
+        ('总单句', report.get('total', 0)),
+        ('总使用', report.get('uses', 0)),
+        ('重复句', report.get('dup', 0)),
+        ('未能识别', report.get('unknown', 0)),
+    ]
+    cw = (W - PAD * 2) // len(metrics)
+    for i, (lab, val) in enumerate(metrics):
+        x = PAD + i * cw
+        d.rounded_rectangle([x + 8, y + 10, x + cw - 8, y + H2 - 10], radius=10, fill=(255,255,255), outline=(210,210,215))
+        d.text((x + cw // 2, y + 24), str(val), fill=(60, 120, 200), font=_get_font(30), anchor='mt')
+        d.text((x + cw // 2, y + 60), lab, fill=(120,120,120), font=nfont, anchor='mt')
+    y += H2 + SEC
+
+    def bar_rows(d, y, items, maxv, color=(70, 130, 220), extra=None):
+        for it in items:
+            if hasattr(it, 'get'):
+                label = it.get('label',''); val = it.get('value',0); sub = it.get('sub','')
+            else:
+                label, val = it; sub = extra(it) if extra else ''
+            yy = y
+            # 标签（左）
+            d.text((PAD, yy + RH//2), label, fill=(40,40,40), font=afont, anchor='lm')
+            # 条
+            bw = int((W - PAD*2 - 180) * (val / maxv)) if maxv else 0
+            bx = PAD + 170
+            d.rounded_rectangle([bx, yy + 8, bx + max(3, bw), yy + RH - 8], radius=6, fill=color)
+            d.text((PAD + 175, yy + RH//2), str(val), fill=(90,90,90), font=nfont, anchor='lm')
+            if sub:
+                d.text((W - PAD, yy + RH//2), sub, fill=(150,150,150), font=nfont, anchor='rm')
+            y += RH
+        return y
+
+    # 常用诗句
+    if nv:
+        y = sec_title(d, y, '常用诗句 TOP')
+        maxv = max((v.get('count',0) for v in report['top_verses']), default=1)
+        for i, v in enumerate(report['top_verses'][:nv]):
+            d.text((PAD, y + RH//2), f'{i+1}. {v.get("text","")}', fill=(30,30,30), font=afont, anchor='lm')
+            bw = int((W-PAD*2-190) * (v.get('count',0)/maxv))
+            bx = PAD + 185
+            d.rounded_rectangle([bx, y+8, bx+max(3,bw), y+RH-8], radius=6, fill=(70,130,220))
+            d.text((PAD+190, y+RH//2), str(v.get('count',0)), fill=(90,90,90), font=nfont, anchor='lm')
+            d.text((W-PAD, y+RH//2), str(v.get('author','') or '未知'), fill=(150,150,150), font=nfont, anchor='rm')
+            y += RH
+        y += SEC
+
+    # 常用诗人
+    if na:
+        y = sec_title(d, y, '常用诗人 TOP')
+        maxv = max((a.get('count',0) for a in report['top_authors']), default=1)
+        for i, a in enumerate(report['top_authors'][:na]):
+            d.text((PAD, y + RH//2), f'{i+1}. {a.get("name","")}', fill=(30,30,30), font=afont, anchor='lm')
+            bw = int((W-PAD*2-150) * (a.get('count',0)/maxv))
+            bx = PAD + 145
+            d.rounded_rectangle([bx, y+8, bx+max(3,bw), y+RH-8], radius=6, fill=(90,160,120))
+            d.text((PAD+150, y+RH//2), str(a.get('count',0)), fill=(90,90,90), font=nfont, anchor='lm')
+            y += RH
+        y += SEC
+
+    # 朝代占比
+    if dyn:
+        y = sec_title(d, y, '朝代占比')
+        for name, cnt, pct in dyn:
+            d.text((PAD, y+RH//2), name, fill=(40,40,40), font=afont, anchor='lm')
+            bw = int((W-PAD*2-140) * pct / 100)
+            d.rounded_rectangle([PAD+90, y+8, PAD+90+max(3,bw), y+RH-8], radius=6, fill=(220,150,80))
+            d.text((PAD+95, y+RH//2), f'{pct}% ({cnt}句)', fill=(90,90,90), font=nfont, anchor='lm')
+            y += RH
+        y += SEC
+
+    # 字数分布
+    y = sec_title(d, y, '字数分布')
+    if wl:
+        maxw = max(w[1] for w in wl) or 1
+        for label, cnt in wl:
+            d.text((PAD, y+RH//2), label, fill=(40,40,40), font=afont, anchor='lm')
+            bw = int((W-PAD*2-140) * cnt / maxw)
+            d.rounded_rectangle([PAD+90, y+8, PAD+90+max(3,bw), y+RH-8], radius=6, fill=(150,120,200))
+            d.text((PAD+95, y+RH//2), str(cnt), fill=(90,90,90), font=nfont, anchor='lm')
+            y += RH
+    else:
+        d.text((PAD, y), '（无数据）', fill=(160,160,160), font=nfont)
+        y += RH
+    y += SEC
+
+    # 常用字
+    y = sec_title(d, y, '常用单字 TOP')
+    if tc:
+        cell = (W - PAD*2) // 5
+        for idx, (ch, cnt) in enumerate(tc):
+            cx = PAD + (idx % 5) * cell
+            cy = y + (idx // 5) * 46
+            d.text((cx + cell//2, cy), f'{ch} x{cnt}', fill=(80,80,80), font=afont, anchor='mm')
+    else:
+        d.text((PAD, y), '（无数据）', fill=(160,160,160), font=nfont)
+
+    img.save(str(output_path), 'PNG')
+    return output_path

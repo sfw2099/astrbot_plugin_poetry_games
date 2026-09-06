@@ -533,6 +533,119 @@ class PoetryPlugin(Star):
         yield event.plain_result(f"📚 {uname} 已积累 {total} 句诗：")
         yield event.image_result(img_path)
 
+    def _build_clause_meta(self):
+        """构建经典曲库单句 → (author, dynasty) 索引（惰性）。"""
+        if getattr(self, "_clause_meta_cache", None) is None:
+            idx = {}
+            for p in self.classic_poems or []:
+                author = (p.get("author") or "").strip()
+                dynasty = (p.get("dynasty") or "").strip()
+                for cl in re.split(r"[，。！？、；：]", (p.get("sentence") or "")):
+                    h = re.sub(r"[^\u4e00-\u9fff]", "", cl)
+                    if h and h not in idx:
+                        idx[h] = (author, dynasty)
+            self._clause_meta_cache = idx
+        return self._clause_meta_cache
+
+    def _verse_meta(self, clause):
+        """返回单句的 (author, dynasty)；经典曲库优先，其次查总库，未知则 (None,None)。"""
+        m = self._build_clause_meta()
+        if clause in m:
+            return m[clause]
+        # 总库查询（对无法在曲库识别的句子尝试一次）
+        try:
+            if self.db is not None:
+                r = self.db.check_exact_poetry(clause)
+                if r:
+                    return r[1], r[2]
+        except Exception:
+            pass
+        return None, None
+
+    def _collect_verse_report(self, uid, uname):
+        """同步收集诗句报表数据（放线程执行避免阻塞）。"""
+        verses = self.pm.get_verses(uid)
+        if not verses:
+            return None
+        total = len(verses)
+        uses = sum(v.get("count", 0) for v in verses.values())
+        dup = sum(1 for v in verses.values() if v.get("count", 0) > 1)
+        author_count = {}   # 作者 -> 使用频次
+        dynasty_count = {}  # 朝代 -> 使用频次
+        verse_meta = {}
+        unknown = 0
+        wordlen = {}
+        char_count = {}
+        # 优先解析使用频次最高的前 60 句出处（控制总库查询量）
+        top_items = sorted(verses.items(), key=lambda kv: -kv[1].get("count", 0))[:60]
+        known = {}
+        for clause, info in top_items:
+            author, dynasty = self._verse_meta(clause)
+            known[clause] = (author, dynasty)
+        for clause, info in verses.items():
+            c = info.get("count", 0)
+            L = len(clause)
+            wordlen[L] = wordlen.get(L, 0) + c
+            for ch in clause:
+                if "\u4e00" <= ch <= "\u9fff":
+                    char_count[ch] = char_count.get(ch, 0) + 1
+            meta = known.get(clause)
+            if not meta or not meta[0] and not meta[1]:
+                unknown += 1
+                verse_meta[clause] = ("未知", "未知")
+                continue
+            author, dynasty = meta
+            author = author or "佚名"
+            dynasty = dynasty or "未知"
+            author_count[author] = author_count.get(author, 0) + c
+            dynasty_count[dynasty] = dynasty_count.get(dynasty, 0) + c
+            verse_meta[clause] = (author, dynasty)
+        # 常用诗句 TOP（附带作者）
+        top_verses = []
+        for clause, info in sorted(verses.items(), key=lambda kv: -kv[1].get("count", 0))[:8]:
+            author, _ = verse_meta.get(clause, ("未知", "未知"))
+            top_verses.append({"text": clause, "count": info.get("count", 0), "author": author})
+        # 常用诗人 TOP（排除佚名/未知）
+        top_authors = [
+            {"name": k, "count": v}
+            for k, v in sorted(author_count.items(), key=lambda kv: -kv[1])
+            if k not in ("佚名", "未知")
+        ][:8]
+        # 朝代占比
+        total_known = sum(dynasty_count.values())
+        dynasties = []
+        for name, cnt in sorted(dynasty_count.items(), key=lambda kv: -kv[1]):
+            pct = int(cnt * 100 / total_known) if total_known else 0
+            dynasties.append((name, cnt, pct))
+        # 字数分布标签
+        wl = []
+        for L, cnt in sorted(wordlen.items()):
+            label = {4: "四言", 5: "五言", 6: "六言", 7: "七言"}.get(L, f"{L}字")
+            wl.append((label, cnt))
+        top_chars = sorted(char_count.items(), key=lambda kv: -kv[1])[:10]
+        return {
+            "uname": uname, "total": total, "uses": uses, "dup": dup, "unknown": unknown,
+            "top_verses": top_verses, "top_authors": top_authors,
+            "dynasties": dynasties, "word_len": wl, "top_chars": top_chars,
+        }
+
+    @filter.command("诗句报表")
+    async def verse_report(self, event: AstrMessageEvent):
+        """生成个人诗句积累分析报表。"""
+        uid = str(event.get_sender_id())
+        uname = event.get_sender_name() or f"用户{uid}"
+        if not self.pm.get_verses(uid):
+            yield event.plain_result(f"{uname} 还没有积累任何诗句，快去参与猜诗句/诗词对垒吧！")
+            return
+        report = await asyncio.to_thread(self._collect_verse_report, uid, uname)
+        if not report:
+            yield event.plain_result("报表生成失败。")
+            return
+        from .game.guess_verse import render_poetry_report
+        img_path = os.path.join(str(self.plugin_data_dir), f"verse_report_{uid}.png")
+        render_poetry_report(report, img_path)
+        yield event.image_result(img_path)
+
     @filter.command("我的成就")
     async def my_achievements(self, event: AstrMessageEvent):
         """查看已解锁成就及进度（图片渲染）。"""
