@@ -76,6 +76,9 @@ ACHIEVEMENTS = {
     "autumn_corpse": ("《尸体》", "猜诗句答案含「秋」字并通关"),
     "winter_breath": ("《呼吸呼吸》", "猜诗句答案含「冬」字并通关"),
     "king_stephen": ("斯蒂芬·金", "猜诗句答案累计含遍「春」「夏」「秋」「冬」四字"),
+    # 诗词内容 · 特殊
+    "dao_fa_zi_ran": ("道法自然", "猜诗句一局内，除最后猜中句外的其余猜测均出自同一首诗（至少 2 条）"),
+    "crychic": ("CRYCHIC", "猜诗句 3 人参与并通关，且本局出现过「苦」「来」「兮」三字"),
 }
 
 # 收尾人等级：按累计次数映射等级名（升序）
@@ -391,6 +394,51 @@ class PlayerManager:
     def get_verses(self, uid):
         """返回玩家诗句字典。"""
         return self.load(uid).get("verses", {})
+
+    # ================= 道具背包 =================
+
+    def _inv(self, uid, name=""):
+        p = self.load(uid, name)
+        return p.setdefault("inventory", {})
+
+    def add_item(self, uid, item, n=1, name=""):
+        """道具入包 n 个。返回最新数量。"""
+        inv = self._inv(uid, name)
+        inv[item] = inv.get(item, 0) + int(n)
+        self.save(uid)
+        return inv[item]
+
+    def get_items(self, uid, name=""):
+        """返回背包副本 {道具: 数量}。"""
+        return dict(self._inv(uid, name))
+
+    def item_count(self, uid, item, name=""):
+        return int(self._inv(uid, name).get(item, 0))
+
+    def consume_item(self, uid, item, n=1, name=""):
+        """消耗 n 个道具；不足返回 False。"""
+        inv = self._inv(uid, name)
+        cur = int(inv.get(item, 0))
+        if cur < n:
+            return False
+        if cur == n:
+            del inv[item]
+        else:
+            inv[item] = cur - n
+        self.save(uid)
+        return True
+
+    def take_random_item(self, from_uid, to_uid, name_from="", name_to=""):
+        """探囊取物：从 from_uid 随机取一个道具转给 to_uid。返回道具名或 None。"""
+        import random as _r
+        inv = self._inv(from_uid, name_from)
+        owned = [k for k, v in inv.items() if v and v > 0]
+        if not owned:
+            return None
+        item = _r.choice(owned)
+        self.consume_item(from_uid, item, 1, name_from)
+        self.add_item(to_uid, item, 1, name_to)
+        return item
 
 
 def _split_single_clauses(text):

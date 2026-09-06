@@ -1345,6 +1345,44 @@ class DuelVerseEngine:
     def history_of(self, side):
         return self.a_history if side == "a" else self.b_history
 
+    def replace_side_puzzle(self, side, new_puzzle):
+        """金蝉脱壳：替换某一方出的题（side=a 为挑战者）。对方要猜的目标随之更新并清空对方历史。"""
+        clean = extract_hanzi(new_puzzle)
+        parts = decompose_text(clean)
+        punct = extract_punct(new_puzzle)
+        if side == "a":
+            self.a_puzzle = new_puzzle
+            self.b_target_hanzi = clean
+            self.b_target_parts = parts
+            self.b_target_punct = punct
+            self.b_history = []
+        else:
+            self.b_puzzle = new_puzzle
+            self.a_target_hanzi = clean
+            self.a_target_parts = parts
+            self.a_target_punct = punct
+            self.a_history = []
+        return True
+
+    def replace_my_target(self, side, new_puzzle):
+        """（备用）替换自己要猜的目标；一般用不到，留作通用。"""
+        clean = extract_hanzi(new_puzzle)
+        parts = decompose_text(clean)
+        punct = extract_punct(new_puzzle)
+        if side == "a":
+            self.b_puzzle = new_puzzle
+            self.a_target_hanzi = clean
+            self.a_target_parts = parts
+            self.a_target_punct = punct
+            self.a_history = []
+        else:
+            self.a_puzzle = new_puzzle
+            self.b_target_hanzi = clean
+            self.b_target_parts = parts
+            self.b_target_punct = punct
+            self.b_history = []
+        return True
+
 
 def render_duel(engine, output_path, hint_mode="pinyin"):
     """渲染诗词对垒棋盘：左=A猜B的题，右=B猜A的题。

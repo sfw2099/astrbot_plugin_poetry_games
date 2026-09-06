@@ -21,6 +21,7 @@ from .game.guess_verse import DuelVerseEngine, render_duel, pick_puzzle_verse
 from .game.guess_verse import extract_hanzi, extract_punct
 from .game.guess_verse import INITIALS_LIST, FINALS_LIST
 from .player_data import PlayerManager, ACHIEVEMENTS
+from .game.items import ITEMS, roll_win_item, roll_loser_item
 from .game.base_game import BOT_ID
 from .game.ai_bot import BotPlayer
 
@@ -646,6 +647,195 @@ class PoetryPlugin(Star):
         render_poetry_report(report, img_path)
         yield event.image_result(img_path)
 
+    @filter.command("我的诗词道具")
+    async def my_items(self, event: AstrMessageEvent):
+        """查看我的诗词道具数量。"""
+        uid = str(event.get_sender_id())
+        uname = event.get_sender_name() or f"用户{uid}"
+        inv = self.pm.get_items(uid, uname)
+        owned = {k: v for k, v in inv.items() if v and v > 0}
+        if not owned:
+            yield event.plain_result(f"{uname} 还没有道具。每局猜诗句/对垒结束，胜者有概率获得道具，败者也有机会。")
+            return
+        lines = [f"🎒 {uname} 的道具："]
+        for k, v in sorted(owned.items(), key=lambda kv: -kv[1]):
+            desc = ITEMS.get(k, {}).get("desc", "")
+            lines.append(f"· {k} x{v}：{desc}")
+        yield event.plain_result("\n".join(lines))
+
+    @filter.command("诗词道具")
+    async def use_item(self, event: AstrMessageEvent, item: str = "", n: str = ""):
+        """使用诗词道具：/诗词道具 道具名 [数量] [额外参数，如定仙游的字或@玩家]"""
+        uid = str(event.get_sender_id())
+        uname = event.get_sender_name() or f"用户{uid}"
+        item = (item or "").strip()
+        if not item or item not in ITEMS:
+            yield event.plain_result(
+                "未知道具。可用道具：\n"
+                + "\n".join(f"· {k}：{v['desc']}" for k, v in ITEMS.items())
+            )
+            return
+        count = 1
+        try:
+            count = max(1, min(int(n or "1"), 10))
+        except ValueError:
+            count = 1
+        # 解析剩余参数（@目标 / 定仙游汉字）
+        raw = str(event.get_message_str() or "").strip()
+        tail = raw
+        tail = re.sub(r"^[/／]?\s*诗词道具\s*", "", tail, flags=re.IGNORECASE)
+        tail = re.sub(r"^" + re.escape(item) + r"\s*", "", tail).strip()
+        mnum = re.match(r"^(\d+)\s*", tail)
+        if mnum:
+            tail = tail[mnum.end():].strip()
+        at_id = self._extract_at_id(event)
+        # 校验数量
+        if self.pm.item_count(uid, item, uname) < count:
+            yield event.plain_result(f"道具【{item}】数量不足（持有 {self.pm.item_count(uid, item, uname)} 个）。")
+            return
+        # 场景判定
+        result = await self._do_use_item(event, uid, uname, item, count, tail, at_id)
+        if isinstance(result, str):
+            yield event.plain_result(result)
+            return
+        async for m in result:
+            yield m
+
+    async def _do_use_item(self, event, uid, uname, item, count, tail, at_id):
+        """按道具分发。返回 str 或 async generator。"""
+        from .game.items import ITEMS as _I
+        # 需在游戏内使用的道具：定位当前会话
+        session_id = str(event.get_group_id() or event.get_session_id())
+        engine = self.guess_verse_sessions.get(session_id)
+        duel_sid = None
+        duel = None
+        for k, d in self.duel_sessions.items():
+            if session_id == k or uid in (d.get("challenger_id"), d.get("opponent_id")):
+                duel, duel_sid = d, k
+                break
+        # 火眼金睛 / 三仙归洞 / 仙人指路（提示类，可对猜诗句或对垒目标）
+        if item in ("火眼金睛", "三仙归洞", "仙人指路"):
+            target_parts = None
+            target_text = None
+            target_author = None
+            if engine is not None and getattr(engine, "target_parts", None):
+                target_parts = engine.target_parts
+                target_text = getattr(engine, "target_hanzi", "")
+                target_author = getattr(engine, "author", "")
+            elif duel is not None and duel.get("engine"):
+                de = duel["engine"]
+                # 当前轮到谁，就提示谁要猜的目标
+                cur = de.current_side()
+                target_parts = de.target_parts_of(cur)
+                target_text = de.a_target_hanzi if cur == "a" else de.b_target_hanzi
+                # 作者：从题目元数据查
+                try:
+                    puzzle = duel.get("puzzles", {}).get(de.b_id if cur == "a" else de.a_id, "")
+                    meta = self.db.check_exact_poetry(puzzle) if self.db else None
+                    target_author = meta[1] if meta else ""
+                except Exception:
+                    target_author = ""
+            if not target_parts:
+                return "当前没有进行中的猜诗句/对垒游戏，无法使用该道具。"
+            self.pm.consume_item(uid, item, count, uname)
+            if item == "火眼金睛":
+                out = []
+                used = set()
+                for _ in range(count):
+                    idx = self._pick_random_index(target_text, used)
+                    if idx is None:
+                        break
+                    used.add(idx)
+                    ch = target_text[idx]
+                    out.append(f"第{idx+1}个字是「{ch}」")
+                return "🔍 火眼金睛：答案中 " + "，".join(out) if out else "答案较短，无法再揭示。"
+            if item == "三仙归洞":
+                out = []
+                used = set()
+                for _ in range(count):
+                    res = self._pick_random_shengmu(target_parts, used)
+                    if not res:
+                        break
+                    idx, sm, ym = res
+                    used.add(idx)
+                    out.append(f"第{idx+1}字 声母「{sm}」韵母「{ym}」")
+                return "🎯 三仙归洞：" + "；".join(out) if out else "无法继续揭示。"
+            # 仙人指路
+            if target_author:
+                return f"📜 仙人指路：当前答案作者是【{target_author}】"
+            return "无法解析答案作者，请稍后再试。"
+        # 定仙游：猜诗句换含字题
+        if item == "定仙游":
+            if engine is None:
+                return "定仙游需在猜诗句进行中使用。"
+            ch = (tail or "").strip()
+            if not ch:
+                return "用法：/诗词道具 定仙游 汉字"
+            new_verse = self._pick_verse_with_char(engine, ch[0])
+            if not new_verse:
+                return f"未能找到同格式且含「{ch[0]}」的诗句，换一个试试。"
+            # 保留引擎其余参数，仅重置目标
+            poem = {"title": new_verse[1], "author": new_verse[2], "dynasty": new_verse[3]}
+            engine._set_target(new_verse[0], poem)
+            engine.participants = set()
+            engine.user_guesses = {}
+            engine.user_verses = set()
+            engine.user_initials = {}
+            engine.user_finals = {}
+            self.pm.consume_item(uid, item, count, uname)
+            return f"🔮 定仙游：题目已更换为一句含「{ch[0]}」的诗句：{new_verse[0]}"
+        # 金蝉脱壳：对垒换自己出的题
+        if item == "金蝉脱壳":
+            if duel is None or not duel.get("engine"):
+                return "金蝉脱壳需在诗词对垒进行中、且轮到你的回合使用。"
+            de = duel["engine"]
+            side = "a" if uid == de.a_id else "b"
+            if not de.is_turn(uid):
+                return "现在不是你的回合，无法使用金蝉脱壳。"
+            old_puzzle = duel.get("puzzles", {}).get(uid, "")
+            new_puzzle = self._pick_duel_replacement(de, side, old_puzzle)
+            if not new_puzzle:
+                return "未找到合适的同格式题目，请稍后再试。"
+            de.replace_side_puzzle(side, new_puzzle)
+            duel["puzzles"][uid] = new_puzzle
+            duel.setdefault("user_verses", {}).setdefault(
+                de.b_id if side == "a" else de.a_id, set()).clear()
+            self.pm.consume_item(uid, item, count, uname)
+            return f"🪙 金蝉脱壳：你的题目已更换为「{new_puzzle}」（对方要重新猜了）。"
+        # 探囊取物：@玩家 偷一个道具
+        if item == "探囊取物":
+            if not at_id or at_id == uid:
+                return "请 @ 一个目标玩家来偷取道具。"
+            stolen = self.pm.take_random_item(at_id, uid, self._uid_name(at_id), uname)
+            if not stolen:
+                return f"对方没有可偷的道具。"
+            self.pm.consume_item(uid, item, 1, uname)
+            return f"🪝 探囊取物成功！从对方身上顺走了【{stolen}】。"
+        # 乐不思蜀 / 百战不殆 / 孤注一掷 / 请君入梦：对垒回合类
+        if item in ("乐不思蜀", "百战不殆", "孤注一掷", "请君入梦"):
+            if duel is None or not duel.get("engine"):
+                return f"{item}需在诗词对垒进行中使用。"
+            de = duel["engine"]
+            if not de.is_turn(uid):
+                return f"{item}需在你的回合使用。"
+            side = "a" if uid == de.a_id else "b"
+            opp = "b" if side == "a" else "a"
+            eff = duel.setdefault("item_effects", {"skip": {}, "immune": {}, "gamble": {}, "dream": {}})
+            self.pm.consume_item(uid, item, count, uname)
+            if item == "乐不思蜀":
+                eff["skip"][opp] = eff["skip"].get(opp, 0) + count
+                return "😴 乐不思蜀：对方下一回合将跳过，你获得一次额外回合。"
+            if item == "百战不殆":
+                eff["immune"][side] = eff["immune"].get(side, 0) + count
+                return "🛡 百战不殆：接下来你方将有若干次免疫机会（对方猜中也不结束）。"
+            if item == "孤注一掷":
+                eff["gamble"][side] = {"active": True, "left": 3 * count}
+                return "🎲 孤注一掷：接下来你将连续追加若干次自己的回合；若仍猜不中则由对方获胜。"
+            if item == "请君入梦":
+                eff["dream"][opp] = eff["dream"].get(opp, 0) + 2 * count
+                return "🌙 请君入梦：对方接下来几次轮到将由系统随机代猜。"
+        return f"道具【{item}】暂未开放使用。"
+
     @filter.command("我的成就")
     async def my_achievements(self, event: AstrMessageEvent):
         """查看已解锁成就及进度（图片渲染）。"""
@@ -678,6 +868,164 @@ class PoetryPlugin(Star):
         if m:
             return m.group(1)
         return None
+
+    def _pick_random_index(self, target_text, used):
+        """从未用过的下标随机挑一个。target_text 纯汉字。"""
+        import random as _r
+        avail = [i for i in range(len(target_text)) if i not in used]
+        if not avail:
+            return None
+        return _r.choice(avail)
+
+    def _pick_random_shengmu(self, target_parts, used):
+        """从未用过的下标随机挑一个字的声母/韵母。返回 (idx, initial, final)。"""
+        import random as _r
+        avail = [i for i, p in enumerate(target_parts) if i not in used and p and p.get("initial") and p.get("final")]
+        if not avail:
+            return None
+        idx = _r.choice(avail)
+        p = target_parts[idx]
+        return idx, p["initial"], p["final"]
+
+    def _current_engine_fmt(self, engine):
+        """返回当前猜诗句的格式 ('single', n)/(combo, (a,b))。"""
+        punct = getattr(engine, "target_punct", []) or []
+        hanzi = getattr(engine, "target_hanzi", "") or ""
+        if not punct:
+            return ("single", len(hanzi))
+        lens = []
+        cur = 0
+        for pos, _p in punct:
+            if pos >= len(hanzi):
+                continue
+            lens.append(pos - cur)
+            cur = pos
+        lens.append(len(hanzi) - cur)
+        return ("combo", tuple(lens))
+
+    def _pick_verse_with_char(self, engine, ch):
+        """猜诗句同格式下随机找一句含 ch 的诗句。返回 (sentence,title,author,dynasty) 或 None。"""
+        import random as _r
+        fmt = self._current_engine_fmt(engine)
+        # 经典曲库候选
+        cands = []
+        for p in self.classic_poems or []:
+            sent = (p.get("sentence") or "")
+            h = re.sub(r"[^\u4e00-\u9fff]", "", sent)
+            if ch not in h:
+                continue
+            punct = extract_punct(sent)
+            if fmt[0] == "single":
+                if not punct and len(h) == fmt[1]:
+                    cands.append((h, p))
+            else:
+                if punct:
+                    segs = re.split(r"[，。！？、；：]", sent)
+                    segs = [re.sub(r"[^\u4e00-\u9fff]", "", s) for s in segs if re.sub(r"[^\u4e00-\u9fff]", "", s)]
+                    if len(segs) == len(fmt[1]) and all(len(s) == n for s, n in zip(segs, fmt[1])):
+                        cands.append((sent, p))
+        if cands:
+            sent, p = _r.choice(cands)
+            return (sent, p.get("title", ""), p.get("author", ""), p.get("dynasty", ""))
+        # 总库候选（随机抽同格式句筛含字，最多尝试若干）
+        if self.db:
+            try:
+                if fmt[0] == "single":
+                    rows = self.db.get_random_verse(fmt[1], fmt[1], target_count=40, max_scan=200)
+                else:
+                    rows = self.db.get_random_verse_by_combo(fmt[1][0], fmt[1][1], target_count=40, max_scan=400)
+                for verse, title, author, dynasty in rows:
+                    if ch in verse and verse != engine.target_text:
+                        return (verse, title, author, dynasty)
+            except Exception:
+                pass
+        return None
+
+    def _pick_duel_replacement(self, de, side, old_puzzle):
+        """对垒金蝉脱壳：给 side 方找同格式新题（单句或同分句两句）。返回新题文本或 None。"""
+        import random as _r
+        old_h = extract_hanzi(old_puzzle)
+        old_punct = extract_punct(old_puzzle)
+        target_hanzi = de.a_target_hanzi if side == "a" else de.b_target_hanzi
+        target_punct = de.a_target_punct if side == "a" else de.b_target_punct
+        # 单句
+        if not old_punct:
+            n = len(old_h)
+            cands = []
+            for p in self.classic_poems or []:
+                h = re.sub(r"[^\u4e00-\u9fff]", "", p.get("sentence") or "")
+                if len(h) == n and not extract_punct(p.get("sentence") or "") and h != old_h and h != target_hanzi:
+                    cands.append(h)
+            if cands:
+                return _r.choice(cands)
+            if self.db:
+                try:
+                    rows = self.db.get_random_verse(n, n, target_count=20, max_scan=200)
+                    for verse, *_ in rows:
+                        if verse != old_h and verse != target_hanzi and self._is_in_library(verse):
+                            return verse
+                except Exception:
+                    pass
+            return None
+        # 两句
+        a_len = len(target_hanzi) if False else None
+        # 用 engine 的目标长度
+        lens = []
+        cur = 0
+        for pos, _p in target_punct:
+            if pos >= len(target_hanzi):
+                continue
+            lens.append(pos - cur)
+            cur = pos
+        lens.append(len(target_hanzi) - cur)
+        if len(lens) == 2:
+            if self.db:
+                try:
+                    rows = self.db.get_random_verse_by_combo(lens[0], lens[1], target_count=20, max_scan=400)
+                    for verse, *_ in rows:
+                        if verse != old_puzzle:
+                            return verse
+                except Exception:
+                    pass
+        return None
+
+    def _pick_auto_guess(self, engine, side):
+        """请君入梦：随机给 side 方挑一句他要猜的目标句。"""
+        import random as _r
+        target_hanzi = engine.a_target_hanzi if side == "a" else engine.b_target_hanzi
+        target_punct = engine.a_target_punct if side == "a" else engine.b_target_punct
+        if not target_punct:
+            n = len(target_hanzi)
+            cands = [h for h in self.classic_clause_set if len(h) == n]
+            if cands:
+                return _r.choice(cands)
+            if self.db:
+                try:
+                    rows = self.db.get_random_verse(n, n, target_count=20, max_scan=300)
+                    if rows:
+                        return rows[0][0]
+                except Exception:
+                    pass
+            return None
+        # 两句
+        segs = []
+        cur = 0
+        for pos, _p in target_punct:
+            if pos >= len(target_hanzi):
+                continue
+            segs.append(pos - cur)
+            cur = pos
+        segs.append(len(target_hanzi) - cur)
+        if len(segs) == 2:
+            if self.db:
+                try:
+                    rows = self.db.get_random_verse_by_combo(segs[0], segs[1], target_count=10, max_scan=300)
+                    if rows:
+                        return rows[0][0]
+                except Exception:
+                    pass
+        return None
+
 
     @staticmethod
     def _parse_poem_format(token):
@@ -1192,6 +1540,39 @@ class PoetryPlugin(Star):
                     yield event.plain_result(payload)
                 else:
                     yield event.image_result(payload)
+            # 乐不思蜀（跳过）/ 请君入梦（代猜）自动推进
+            auto_step = 0
+            while (not result.get("finished")) and sid in self.duel_sessions:
+                auto_step += 1
+                if auto_step > 6:
+                    break
+                engine = duel.get("engine")
+                if not engine:
+                    break
+                eff = duel.get("item_effects", {})
+                cur = engine.current_side()
+                cur_uid = engine.a_id if cur == "a" else engine.b_id
+                if eff.get("skip", {}).get(cur, 0) > 0:
+                    eff["skip"][cur] -= 1
+                    engine.switch_turn()
+                    yield event.plain_result(f"😴 对方被【乐不思蜀】跳过一回合，轮到 {engine.current_name()}。")
+                    continue
+                if eff.get("dream", {}).get(cur, 0) > 0 and str(cur_uid) != str(BOT_ID):
+                    eff["dream"][cur] -= 1
+                    guess = self._pick_auto_guess(engine, cur)
+                    if not guess:
+                        break
+                    r2 = self._apply_duel_guess(
+                        duel, sid, cur_uid, self._uid_name(cur_uid), guess,
+                    )
+                    for kind, payload in r2.get("msgs", []):
+                        if kind == "text":
+                            yield event.plain_result(payload)
+                        else:
+                            yield event.image_result(payload)
+                    result = r2
+                    continue
+                break
             # bot 回合触发（若轮到 bot）
             self._maybe_bot_duel_turn(duel, sid, event)
             return
@@ -1569,6 +1950,20 @@ class PoetryPlugin(Star):
             msgs.append(("text", f"🎉 猜中了！{engine.target_text}\n（本局参与 {n_participants} 人）"))
             for m in self._settle_guess_verse_achievements(engine, uid, uname):
                 msgs.append(("text", m))
+            # 道具掉落：胜者按自身猜测次数概率，败者(其他参与者)固定 5%
+            wg = engine.user_guesses.get(uid, 0) if hasattr(engine, "user_guesses") else len(engine.history)
+            win_item = roll_win_item(wg, "verse")
+            if win_item:
+                self.pm.add_item(uid, win_item, 1, uname)
+                msgs.append(("text", f"🎁 {uname} 获得道具【{win_item}】！"))
+            for puid in list(participants):
+                if str(puid) == str(uid):
+                    continue
+                loser_item = roll_loser_item("verse")
+                if loser_item:
+                    pname = self._uid_name(puid)
+                    self.pm.add_item(puid, loser_item, 1, pname)
+                    msgs.append(("text", f"🎁 {pname} 获得道具【{loser_item}】！"))
             self.guess_verse_sessions.pop(session_id, None)
             finished = True
         elif engine.is_finished():
@@ -1598,6 +1993,25 @@ class PoetryPlugin(Star):
             all_guess_text += _t or ""
         # 日志：本局参与人数与参与者，便于排查成就触发
         logger.info(f"[成就] 猜诗句结算：本局参与 {n} 人 → {sorted(participants)}")
+
+        # 道法自然：非成功猜测(≥2条)均出自同一首诗
+        dao_trigger = False
+        non_win_guesses = [t for t, _p, _c in getattr(engine, "history", [])]
+        if len(non_win_guesses) >= 3 and len(engine.history) >= 2:
+            # 去掉最后一条（成功的）
+            non_win = engine.history[:-1]
+            if len(non_win) >= 2:
+                common = None
+                for t, _p, _c in non_win:
+                    titles = set(self._poem_titles_of(t or ""))
+                    if not titles:
+                        common = None
+                        break
+                    common = titles if common is None else (common & titles)
+                    if not common:
+                        break
+                dao_trigger = bool(common)
+        crychic_trigger = n >= 3 and all(ch in all_guess_text for ch in "苦来兮")
 
         for p_uid in participants:
             p_name = self._uid_name(p_uid)
@@ -1663,6 +2077,14 @@ class PoetryPlugin(Star):
             if n >= 3 and all(ch in all_guess_text for ch in "春日影"):
                 if pm.unlock_achievement(p_uid, "spring_film", p_name):
                     msgs.append(self._achieve_msg(p_uid, "spring_film"))
+            # CRYCHIC：≥3人参与 且 出现过「苦」「来」「兮」
+            if crychic_trigger:
+                if pm.unlock_achievement(p_uid, "crychic", p_name):
+                    msgs.append(self._achieve_msg(p_uid, "crychic"))
+            # 道法自然：非成功猜测均出自同一首诗（≥2条）
+            if dao_trigger:
+                if pm.unlock_achievement(p_uid, "dao_fa_zi_ran", p_name):
+                    msgs.append(self._achieve_msg(p_uid, "dao_fa_zi_ran"))
             # 赢家统计
             if p_uid == winner_uid:
                 pm.inc_stat(p_uid, "guess_wins", 1, p_name)
@@ -1770,6 +2192,15 @@ class PoetryPlugin(Star):
             if beloved:
                 bv, bc = beloved
                 msgs.append(f"🏆 {self._uid_name(p)} 达成成就「挚爱诗句-{bv}」！（使用 {bc} 次）")
+        # 道具掉落：胜者按猜测次数概率，败者固定 5%
+        win_item = roll_win_item(win_guesses, "duel")
+        if win_item:
+            self.pm.add_item(winner_uid, win_item, 1, self._uid_name(winner_uid))
+            msgs.append(f"🎁 {self._uid_name(winner_uid)} 获得道具【{win_item}】！")
+        loser_item = roll_loser_item("duel")
+        if loser_item:
+            self.pm.add_item(loser_id, loser_item, 1, self._uid_name(loser_id))
+            msgs.append(f"🎁 {self._uid_name(loser_id)} 获得道具【{loser_item}】！")
         return msgs
 
     def _check_soulmate(self, duel, a_id, b_id):
@@ -1845,6 +2276,7 @@ class PoetryPlugin(Star):
         """
         msgs = []
         engine = duel["engine"]
+        eff = duel.setdefault("item_effects", {"skip": {}, "immune": {}, "gamble": {}, "dream": {}})
         hanzi = re.sub(r'[^\u4e00-\u9fff]', '', clean)
         side = "a" if uid == engine.a_id else "b"
         target_punct = engine.a_target_punct if side == "a" else engine.b_target_punct
@@ -1923,7 +2355,16 @@ class PoetryPlugin(Star):
         render_duel(engine, img_path, hint_mode=duel.get("hint_mode", "pinyin"))
         msgs.append(("image", img_path))
         finished = False
-        if all_correct:
+        immune_opp = "b" if side == "a" else "a"  # 被猜中题的一方（题目归属方）
+        if all_correct and eff["immune"].get(immune_opp, 0) > 0:
+            # 百战不殆：被猜中方免疫一次，不结束，给其反杀回合
+            eff["immune"][immune_opp] -= 1
+            engine.winner = None
+            left = eff["immune"].get(immune_opp, 0)
+            msgs.append(("text", f"🛡 对方使用【百战不殆】免疫了这次命中！（剩余 {left} 次）"))
+            engine.switch_turn()
+            msgs.append(("text", f"轮到 {engine.current_name()}。"))
+        elif all_correct:
             wname = engine.side_name(side)
             win_text = (
                 f"🏆 {wname} 猜中了对方的诗句！\n"
@@ -1936,13 +2377,33 @@ class PoetryPlugin(Star):
             self.duel_sessions.pop(sid, None)
             finished = True
         else:
-            engine.switch_turn()
-            gc = duel.get("guess_counts", {})
-            if gc.get(engine.a_id, 0) >= 20 and gc.get(engine.b_id, 0) >= 20:
-                for p in (engine.a_id, engine.b_id):
-                    if self.pm.unlock_achievement(p, "too_dark", self._uid_name(p)):
-                        msgs.append(("text", self._achieve_msg(p, "too_dark")))
-            msgs.append(("text", f"轮到 {engine.current_name()}。"))
+            # 孤注一掷：出手方连续多次未命中
+            gamble = eff["gamble"].get(side)
+            if gamble and gamble.get("active"):
+                left = int(gamble.get("left", 0)) - 1
+                if left <= 0:
+                    eff["gamble"][side]["active"] = False
+                    eff["gamble"][side]["left"] = 0
+                    # 孤注耗尽仍未中 -> 判出手方失败
+                    loser_name = self._uid_name(uid)
+                    win_name = self._uid_name(engine.a_id if side == "b" else engine.b_id)
+                    msgs.append(("text", f"🎲 【孤注一掷】耗尽仍未猜中，{loser_name} 判定失败，{win_name} 获胜！"))
+                    self.duel_sessions.pop(sid, None)
+                    finished = True
+                else:
+                    eff["gamble"][side]["left"] = left
+                    msgs.append(("text", f"🎲 【孤注一掷】继续你的回合（还剩 {left} 次）。"))
+                if finished:
+                    return {"ok": True, "err": None, "comp": comp, "all_correct": False,
+                            "finished": True, "msgs": msgs}
+            else:
+                engine.switch_turn()
+                gc = duel.get("guess_counts", {})
+                if gc.get(engine.a_id, 0) >= 20 and gc.get(engine.b_id, 0) >= 20:
+                    for p in (engine.a_id, engine.b_id):
+                        if self.pm.unlock_achievement(p, "too_dark", self._uid_name(p)):
+                            msgs.append(("text", self._achieve_msg(p, "too_dark")))
+                msgs.append(("text", f"轮到 {engine.current_name()}。"))
         return {"ok": True, "err": None, "comp": comp, "all_correct": all_correct,
                 "finished": finished, "msgs": msgs}
 
