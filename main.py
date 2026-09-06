@@ -701,6 +701,39 @@ class PoetryPlugin(Star):
         async for m in result:
             yield m
 
+    @filter.command("抽道具")
+    async def draw_item(self, event: AstrMessageEvent, text: str = ""):
+        """抽道具：接一句你没积累过的诗句，10% 概率随机获得一个道具，诗句并入库。"""
+        import random as _r
+        uid = str(event.get_sender_id())
+        uname = event.get_sender_name() or f"用户{uid}"
+        raw = str(event.get_message_str() or "").strip()
+        verse = re.sub(r"^[/／]?\s*抽道具\s*", "", raw, flags=re.IGNORECASE).strip()
+        verse = verse.strip("「」""''")
+        # 提取分句（纯汉字）
+        clauses = [re.sub(r"[^\u4e00-\u9fff]", "", c) for c in re.split(r"[，。！？、；：\s]+", verse)]
+        clauses = [c for c in clauses if c]
+        if not clauses:
+            yield event.plain_result("用法：/抽道具 一句你尚未积累过的诗句")
+            return
+        # 不能与自己的诗句库重合
+        mine = self.pm.get_verses(uid)
+        all_used = all(c in mine for c in clauses)
+        if all_used:
+            yield event.plain_result(f"{uname} 这句诗你已经积累过了，换一句新的试试吧！")
+            return
+        # 并入诗句库
+        self.pm.record_verse(uid, verse, uname)
+        for a in self.pm.check_verse_achievements(uid, uname):
+            yield event.plain_result(f"🏆 {uname} 达成成就「{ACHIEVEMENTS.get(a, (a, ''))[0]}」！")
+        # 10% 概率随机获得道具
+        if _r.randint(1, 100) <= 10:
+            item = _r.choice(list(ITEMS.keys()))
+            self.pm.add_item(uid, item, 1, uname)
+            yield event.plain_result(f"🎁 恭喜！抽中了道具【{item}】！已放入背包（/我的诗词道具 查看）。")
+        else:
+            yield event.plain_result("这次没有抽到道具（10% 概率），诗句已记入你的积累库，再接再厉！")
+
     async def _do_use_item(self, event, uid, uname, item, count, tail, at_id):
         """按道具分发。返回 str 或 async generator。"""
         from .game.items import ITEMS as _I
