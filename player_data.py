@@ -65,7 +65,9 @@ ACHIEVEMENTS = {
     "night_owl": ("更深月色半人家", "23:00-5:00 完成一局诗词游戏"),
     "early_bird": ("雄鸡一唱天下白", "5:00-8:00 完成一局诗词游戏"),
     "five_word": ("五言专家", "累计使用 5 字单句 100 条"),
+    "six_word": ("六言高手", "累计使用 6 字单句 100 条"),
     "seven_word": ("七言高手", "累计使用 7 字单句 100 条"),
+    "four_word": ("四言专家", "累计使用 4 字单句 100 条"),
     "beloved_verse": ("挚爱诗句", "某诗句累计使用 50 次且为本人最高频诗句"),
     # 诗词内容 · 季节
     "spring_film": ("《春日影》", "猜诗句至少 3 人参与并通关，且本局猜测中出现过「春」「日」「影」三字"),
@@ -238,7 +240,9 @@ class PlayerManager:
         verses = p["verses"]
         total = len(verses)
         five = sum(1 for v in verses if len(v) == 5)
+        six = sum(1 for v in verses if len(v) == 6)
         seven = sum(1 for v in verses if len(v) == 7)
+        four = sum(1 for v in verses if len(v) == 4)
         now = time.localtime()
         hour = now.tm_hour
         is_night = hour >= 23 or hour < 5
@@ -247,7 +251,9 @@ class PlayerManager:
         checks = {
             "poet_100": total >= 100,
             "poet_1000": total >= 1000,
+            "four_word": four >= 100,
             "five_word": five >= 100,
+            "six_word": six >= 100,
             "seven_word": seven >= 100,
         }
         # 时段成就：仅在完成一局时由外部触发时段标记，这里不做时段检查（避免误判）
