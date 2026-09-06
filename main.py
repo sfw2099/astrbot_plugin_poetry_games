@@ -649,19 +649,20 @@ class PoetryPlugin(Star):
 
     @filter.command("我的诗词道具")
     async def my_items(self, event: AstrMessageEvent):
-        """查看我的诗词道具数量。"""
+        """查看我的诗词道具数量（图片渲染）。"""
         uid = str(event.get_sender_id())
         uname = event.get_sender_name() or f"用户{uid}"
         inv = self.pm.get_items(uid, uname)
         owned = {k: v for k, v in inv.items() if v and v > 0}
-        if not owned:
-            yield event.plain_result(f"{uname} 还没有道具。每局猜诗句/对垒结束，胜者有概率获得道具，败者也有机会。")
-            return
-        lines = [f"🎒 {uname} 的道具："]
+        items = {}
         for k, v in sorted(owned.items(), key=lambda kv: -kv[1]):
-            desc = ITEMS.get(k, {}).get("desc", "")
-            lines.append(f"· {k} x{v}：{desc}")
-        yield event.plain_result("\n".join(lines))
+            items[k] = {"count": v, "desc": ITEMS.get(k, {}).get("desc", "")}
+        if not items:
+            items["（空）"] = {"count": 0, "desc": "还没有道具。每局猜诗句/对垒结束，胜者有概率获得道具，败者也有机会。"}
+        from .game.guess_verse import render_items
+        img_path = os.path.join(str(self.plugin_data_dir), f"my_items_{uid}.png")
+        render_items(items, uname, img_path)
+        yield event.image_result(img_path)
 
     @filter.command("诗词道具")
     async def use_item(self, event: AstrMessageEvent, item: str = "", n: str = ""):

@@ -1833,3 +1833,26 @@ def render_poetry_report(report, output_path):
 
     img.save(str(output_path), 'PNG')
     return output_path
+
+
+def render_items(items, uname, output_path):
+    """渲染道具背包图。items: {道具名: {count, desc}}。"""
+    W = 820; PAD = 30; RH = 56
+    tfont = _get_font(30); hfont = _get_font(24); sfont = _get_font(20)
+    rows = list(items.items())
+    H = PAD*2 + 70 + max(1,len(rows))*RH
+    img = Image.new('RGB', (W, H), (250,250,252))
+    d = ImageDraw.Draw(img)
+    d.text((W//2, 18), f"{uname} 的道具", fill=(40,40,40), font=tfont, anchor='mt')
+    y = PAD+70
+    if not rows:
+        d.text((W//2, y), '（还没有道具）', fill=(160,160,160), font=sfont, anchor='mt')
+    for name, info in rows:
+        cnt = info.get('count',0)
+        desc = info.get('desc','')
+        d.rounded_rectangle([PAD, y, W-PAD, y+RH-8], radius=10, fill=(255,255,255), outline=(210,210,215))
+        d.text((PAD+16, y+(RH-8)//2), f'{name} x{cnt}', fill=(50,120,190), font=hfont, anchor='lm')
+        d.text((PAD+180, y+(RH-8)//2), desc, fill=(110,110,110), font=sfont, anchor='lm')
+        y += RH
+    img.save(str(output_path),'PNG')
+    return output_path
