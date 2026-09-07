@@ -73,6 +73,7 @@ class PoetryPlugin(Star):
         self.guess_verse_sessions = {}
         self.battle_sessions = {}  # 邀战对战会话
         self.duel_sessions = {}    # 诗词对垒会话
+        self._shell_wait = {}      # 金蝉脱壳私聊换题：{uid: {"sid":..., "side":...}}
         # AI bot 玩家
         self.ai_bot = BotPlayer(
             self,
@@ -873,26 +874,20 @@ class PoetryPlugin(Star):
             side = "a" if uid == de.a_id else "b"
             if not de.is_turn(uid):
                 return "现在不是你的回合，无法使用金蝉脱壳。"
-            new_puzzle = (tail or "").strip()
-            if not new_puzzle:
-                return "用法：/诗词道具 金蝉脱壳 新诗句（需与当前格式一致、为库中真实诗句）。"
-            old_puzzle = duel.get("puzzles", {}).get(uid, "")
-            if not self._puzzle_matches_format(de, side, old_puzzle, new_puzzle):
-                return "新题格式需与当前一致且为库中真实诗句。"
-            de.replace_side_puzzle(side, new_puzzle)
-            duel["puzzles"][uid] = new_puzzle
-            duel.setdefault("user_verses", {}).setdefault(
-                de.b_id if side == "a" else de.a_id, set()).clear()
-            self.pm.consume_item(uid, item, count, uname)
-            # 不透题：不回显新题明文
-            import time as _t
-            duel_img = os.path.join(str(self.plugin_data_dir), f"duel_{duel_sid}_{int(_t.time())}.png")
-            render_duel(de, duel_img, hint_mode=duel.get("hint_mode", "pinyin"))
-
-            async def _gen():
-                yield event.plain_result("🪙 金蝉脱壳：已更换你出的题，对方要重新猜了。请继续游戏。")
-                yield event.image_result(duel_img)
-            return _gen()
+            if self.pm.item_count(uid, item, uname) <= 0:
+                return f"道具【{item}】数量不足。"
+            if uid in self._shell_wait:
+                if time.time() - self._shell_wait[uid].get("ts", 0) <= 120:
+                    return "你已有进行中的金蝉脱壳换题，请到私聊发送「cc 新诗句」。"
+                self._shell_wait.pop(uid, None)
+            self._shell_wait[uid] = {"sid": duel_sid, "side": side, "ts": time.time()}
+            # 私信玩家提供新题；不透题到群
+            ok = await self._send_private(
+                event.bot, uid,
+                "🪙 金蝉脱壳：请私聊发送你的新题目（格式需与当前一致，前缀 cc），"
+                "例：cc 床前明月光",
+            )
+            return f"🪙 已私信你，请到私聊发送新题目（前缀 cc）。" + ("" if ok else "（私聊发送失败，请确认已添加机器人为好友）")
         # 探囊取物：@玩家 偷一个道具
         if item == "探囊取物":
             if not at_id or at_id == uid:
@@ -2720,10 +2715,68 @@ class PoetryPlugin(Star):
     # 全局监听分发中枢
     # ==========================================
     @filter.event_message_type(filter.EventMessageType.ALL)
+    async def _handle_shell_private(self, event, msg_raw, is_private, handled):
+        """金蝉脱壳：玩家在私聊发送新题（cc 前缀），校验后换题并通知对垒群。返回是否已处理。"""
+        if not is_private:
+            return
+        uid = str(event.get_sender_id())
+        st = self._shell_wait.get(uid)
+        if not st:
+            return
+        if not msg_raw.startswith("cc"):
+            # 仍在等待新题，普通私聊消息不拦截（让给其它处理）
+            return
+        handled[0] = True
+        clean = re.sub(r"^cc\s*", "", msg_raw).strip()
+        sid = st.get("sid")
+        duel = self.duel_sessions.get(sid)
+        if not duel or not duel.get("engine"):
+            self._shell_wait.pop(uid, None)
+            yield event.plain_result("对垒会话已结束，金蝉脱壳取消。")
+            return
+        de = duel["engine"]
+        side = "a" if uid == de.a_id else "b"
+        old_puzzle = duel.get("puzzles", {}).get(uid, "")
+        if not self._puzzle_matches_format(de, side, old_puzzle, clean):
+            yield event.plain_result("新题格式需与当前一致且为库中真实诗句，请重发（前缀 cc）。")
+            return
+        # 换题并消耗道具
+        de.replace_side_puzzle(side, clean)
+        duel["puzzles"][uid] = clean
+        duel.setdefault("user_verses", {}).setdefault(
+            de.b_id if side == "a" else de.a_id, set()).clear()
+        self.pm.consume_item(uid, "金蝉脱壳", 1, event.get_sender_name() or f"用户{uid}")
+        self._shell_wait.pop(uid, None)
+        # 回合交给对方（对方重新猜你的新题）
+        de.switch_turn()
+        import time as _t
+        duel_img = os.path.join(str(self.plugin_data_dir), f"duel_{sid}_{int(_t.time())}.png")
+        render_duel(de, duel_img, hint_mode=duel.get("hint_mode", "pinyin"))
+        origin = duel.get("group_origin")
+        turn_text = f"🪙 金蝉脱壳成功，对方要重新猜了！现在轮到 {de.current_name()}。"
+        if origin:
+            try:
+                from astrbot.api.all import Plain as _Plain, Image as _Image, MessageChain as _MC
+                await self.context.send_message(origin, _MC([_Plain(turn_text), _Image.fromFileSystem(duel_img)]))
+            except Exception as e:
+                logger.error(f"[金蝉脱壳] 群通知失败: {e}")
+        # 若轮到 bot 且启用 AI bot，触发其回合
+        try:
+            if de.is_turn(BOT_ID) and self.ai_bot.enabled:
+                self._maybe_bot_duel_turn(duel, sid, event)
+        except Exception:
+            pass
+
     async def handle_recv_msg(self, event: AstrMessageEvent):
         msg_raw = event.message_str.strip()
         # 🍵 诗词对垒处理（优先，含确认/私聊出题/群聊猜测）
         is_private = bool(event.is_private_chat()) if hasattr(event, "is_private_chat") else False
+        # 金蝉脱壳：私聊换题优先（cc 前缀）
+        handled_shell = [False]
+        async for result in self._handle_shell_private(event, msg_raw, is_private, handled_shell):
+            yield result
+        if handled_shell[0]:
+            return
         if msg_raw.startswith("cc") or self.duel_sessions:
             handled = [False]
             async for result in self._handle_duel_message(event, msg_raw, is_private, handled):
