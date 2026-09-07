@@ -704,7 +704,7 @@ class PoetryPlugin(Star):
 
     def _roll_draw(self, uid, uname):
         """统一抽道具掷骰：基础 10% + draw_bonus。命中给随机道具并重置；未中累加 +10（上限使命中=100%）。
-        返回提示文本。"""
+        返回 (命中?, 提示文本)。"""
         import random as _r
         bonus = self.pm.get_draw_bonus(uid, uname)
         rate = 10 + bonus
@@ -712,10 +712,10 @@ class PoetryPlugin(Star):
             self.pm.reset_draw_bonus(uid, uname)
             item = _r.choice(list(ITEMS.keys()))
             self.pm.add_item(uid, item, 1, uname)
-            return f"🎁 抽中了道具【{item}】！本次概率 {rate}%（保底已重置，可用 /我的诗词道具 查看）。"
+            return True, f"🎁 抽中了道具【{item}】！本次概率 {rate}%（保底已重置，可用 /我的诗词道具 查看）。"
         self.pm.add_draw_bonus(uid, 10, uname)
         new_rate = min(10 + self.pm.get_draw_bonus(uid, uname), 100)
-        return f"未抽中（本次 {rate}%），下次概率提升至 {new_rate}%。"
+        return False, f"未抽中（本次 {rate}%），下次概率提升至 {new_rate}%。"
 
     @filter.command("抽道具")
     async def draw_item(self, event: AstrMessageEvent, text: str = ""):
@@ -741,7 +741,7 @@ class PoetryPlugin(Star):
         self.pm.record_verse(uid, verse, uname)
         for a in self.pm.check_verse_achievements(uid, uname):
             yield event.plain_result(f"🏆 {uname} 达成成就「{ACHIEVEMENTS.get(a, (a, ''))[0]}」！")
-        yield event.plain_result(self._roll_draw(uid, uname))
+        yield event.plain_result(self._roll_draw(uid, uname)[1])
 
     async def _do_use_item(self, event, uid, uname, item, count, tail, at_id):
         """按道具分发。返回 str 或 async generator。"""
@@ -825,7 +825,15 @@ class PoetryPlugin(Star):
             engine.user_initials = {}
             engine.user_finals = {}
             self.pm.consume_item(uid, item, count, uname)
-            return f"🔮 定仙游：题目已更换为一句含「{ch[0]}」的诗句：{new_verse[0]}"
+            import time as _t
+            blank_path = os.path.join(str(self.plugin_data_dir),
+                                      f"verse_blank_{session_id}_{int(_t.time())}.png")
+            render_blank(engine, blank_path)
+
+            async def _gen():
+                yield event.plain_result(f"🔮 定仙游：已重新出题（含「{ch[0]}」），旧题目作废，请重新开始猜测。")
+                yield event.image_result(blank_path)
+            return _gen()
         # 金蝉脱壳：对垒换自己出的题
         if item == "金蝉脱壳":
             if duel is None or not duel.get("engine"):
@@ -1946,9 +1954,11 @@ class PoetryPlugin(Star):
         # 记录诗句到个人数据
         added = self.pm.record_verse(uid, clean, uname)
         self.pm.inc_stat(uid, "total_guesses", 1, uname)
-        # 游戏内抽道具：用到了自己诗句库中没有的新句 → 触发一次抽道具
+        # 游戏内抽道具：用到了自己诗句库中没有的新句 → 触发一次抽道具（仅命中时提示）
         if added > 0 and uid != BOT_ID:
-            msgs.append(("text", f"✨ {uname} 使用新诗句，触发抽道具！" + self._roll_draw(uid, uname)))
+            _hit, _tip = self._roll_draw(uid, uname)
+            if _hit:
+                msgs.append(("text", f"✨ {uname} 使用新诗句，触发抽道具！{_tip}"))
         # 检查个人/特殊成就
         for a in self.pm.check_verse_achievements(uid, uname):
             msgs.append(("text", f"🏆 {uname} 达成成就「{ACHIEVEMENTS.get(a, (a,''))[0]}」！"))
@@ -2001,7 +2011,7 @@ class PoetryPlugin(Star):
             if win_item:
                 self.pm.add_item(uid, win_item, 1, uname)
                 msgs.append(("text", f"🎁 {uname} 获得道具【{win_item}】！"))
-            for puid in list(participants):
+            for puid in list(getattr(engine, "participants", set())):
                 if str(puid) == str(uid):
                     continue
                 loser_item = roll_loser_item("verse")
@@ -2348,9 +2358,11 @@ class PoetryPlugin(Star):
         # 记录猜测诗句到个人数据（仅合法猜测）
         added = self.pm.record_verse(uid, clean, uname)
         self.pm.inc_stat(uid, "total_guesses", 1, uname)
-        # 游戏内抽道具：用到了自己诗句库中没有的新句 → 触发一次抽道具
+        # 游戏内抽道具：用到了自己诗句库中没有的新句 → 触发一次抽道具（仅命中时提示）
         if added > 0 and uid != BOT_ID:
-            msgs.append(("text", f"✨ {uname} 使用新诗句，触发抽道具！" + self._roll_draw(uid, uname)))
+            _hit, _tip = self._roll_draw(uid, uname)
+            if _hit:
+                msgs.append(("text", f"✨ {uname} 使用新诗句，触发抽道具！{_tip}"))
         # 🐖 重复诗句检测（本局内自己发过的纯汉字）
         if "user_verses" not in duel:
             duel["user_verses"] = {}
