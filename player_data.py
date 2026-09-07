@@ -440,6 +440,26 @@ class PlayerManager:
         self.add_item(to_uid, item, 1, name_to)
         return item
 
+    # ================= 抽道具保底 =================
+
+    def get_draw_bonus(self, uid, name=""):
+        """当前抽道具概率累加值（基础 10% + bonus）。"""
+        p = self.load(uid, name)
+        return int(p["stats"].get("draw_bonus", 0))
+
+    def reset_draw_bonus(self, uid, name=""):
+        """抽中后重置保底。"""
+        p = self.load(uid, name)
+        p["stats"]["draw_bonus"] = 0
+        self.save(uid)
+
+    def add_draw_bonus(self, uid, step, name=""):
+        """未抽中时累加保底，上限 90（使基础 10% 叠加到 100% 必中）。"""
+        p = self.load(uid, name)
+        cur = int(p["stats"].get("draw_bonus", 0))
+        p["stats"]["draw_bonus"] = min(cur + int(step), 90)
+        self.save(uid)
+
 
 def _split_single_clauses(text):
     """将含标点的诗句拆成单个分句（去标点），两句则拆两个单句。"""

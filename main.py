@@ -702,10 +702,24 @@ class PoetryPlugin(Star):
         async for m in result:
             yield m
 
+    def _roll_draw(self, uid, uname):
+        """统一抽道具掷骰：基础 10% + draw_bonus。命中给随机道具并重置；未中累加 +10（上限使命中=100%）。
+        返回提示文本。"""
+        import random as _r
+        bonus = self.pm.get_draw_bonus(uid, uname)
+        rate = 10 + bonus
+        if _r.randint(1, 100) <= rate:
+            self.pm.reset_draw_bonus(uid, uname)
+            item = _r.choice(list(ITEMS.keys()))
+            self.pm.add_item(uid, item, 1, uname)
+            return f"🎁 抽中了道具【{item}】！本次概率 {rate}%（保底已重置，可用 /我的诗词道具 查看）。"
+        self.pm.add_draw_bonus(uid, 10, uname)
+        new_rate = min(10 + self.pm.get_draw_bonus(uid, uname), 100)
+        return f"未抽中（本次 {rate}%），下次概率提升至 {new_rate}%。"
+
     @filter.command("抽道具")
     async def draw_item(self, event: AstrMessageEvent, text: str = ""):
-        """抽道具：接一句你没积累过的诗句，10% 概率随机获得一个道具，诗句并入库。"""
-        import random as _r
+        """抽道具：接一句你没积累过的诗句，随机概率获得道具（连抽递增），诗句并入库。"""
         uid = str(event.get_sender_id())
         uname = event.get_sender_name() or f"用户{uid}"
         raw = str(event.get_message_str() or "").strip()
@@ -727,13 +741,7 @@ class PoetryPlugin(Star):
         self.pm.record_verse(uid, verse, uname)
         for a in self.pm.check_verse_achievements(uid, uname):
             yield event.plain_result(f"🏆 {uname} 达成成就「{ACHIEVEMENTS.get(a, (a, ''))[0]}」！")
-        # 10% 概率随机获得道具
-        if _r.randint(1, 100) <= 10:
-            item = _r.choice(list(ITEMS.keys()))
-            self.pm.add_item(uid, item, 1, uname)
-            yield event.plain_result(f"🎁 恭喜！抽中了道具【{item}】！已放入背包（/我的诗词道具 查看）。")
-        else:
-            yield event.plain_result("这次没有抽到道具（10% 概率），诗句已记入你的积累库，再接再厉！")
+        yield event.plain_result(self._roll_draw(uid, uname))
 
     async def _do_use_item(self, event, uid, uname, item, count, tail, at_id):
         """按道具分发。返回 str 或 async generator。"""
@@ -1936,8 +1944,11 @@ class PoetryPlugin(Star):
         else:
             engine.user_verses.add(hanzi)
         # 记录诗句到个人数据
-        self.pm.record_verse(uid, clean, uname)
+        added = self.pm.record_verse(uid, clean, uname)
         self.pm.inc_stat(uid, "total_guesses", 1, uname)
+        # 游戏内抽道具：用到了自己诗句库中没有的新句 → 触发一次抽道具
+        if added > 0 and uid != BOT_ID:
+            msgs.append(("text", f"✨ {uname} 使用新诗句，触发抽道具！" + self._roll_draw(uid, uname)))
         # 检查个人/特殊成就
         for a in self.pm.check_verse_achievements(uid, uname):
             msgs.append(("text", f"🏆 {uname} 达成成就「{ACHIEVEMENTS.get(a, (a,''))[0]}」！"))
@@ -2335,8 +2346,11 @@ class PoetryPlugin(Star):
         if not ok:
             return _fail(err)
         # 记录猜测诗句到个人数据（仅合法猜测）
-        self.pm.record_verse(uid, clean, uname)
+        added = self.pm.record_verse(uid, clean, uname)
         self.pm.inc_stat(uid, "total_guesses", 1, uname)
+        # 游戏内抽道具：用到了自己诗句库中没有的新句 → 触发一次抽道具
+        if added > 0 and uid != BOT_ID:
+            msgs.append(("text", f"✨ {uname} 使用新诗句，触发抽道具！" + self._roll_draw(uid, uname)))
         # 🐖 重复诗句检测（本局内自己发过的纯汉字）
         if "user_verses" not in duel:
             duel["user_verses"] = {}
