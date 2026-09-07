@@ -705,7 +705,7 @@ class PoetryPlugin(Star):
 
     def _roll_draw(self, uid, uname):
         """统一抽道具掷骰：基础 10% + draw_bonus。命中给随机道具并重置；未中累加 +10（上限使命中=100%）。
-        返回 (命中?, 提示文本)。"""
+        返回 (命中?, 提示文本, 成就提示)。"""
         import random as _r
         bonus = self.pm.get_draw_bonus(uid, uname)
         rate = 10 + bonus
@@ -713,10 +713,13 @@ class PoetryPlugin(Star):
             self.pm.reset_draw_bonus(uid, uname)
             item = _r.choice(list(ITEMS.keys()))
             self.pm.add_item(uid, item, 1, uname)
-            return True, f"🎁 抽中了道具【{item}】！本次概率 {rate}%（保底已重置，可用 /我的诗词道具 查看）。"
+            return True, f"🎁 抽中了道具【{item}】！本次概率 {rate}%（保底已重置，可用 /我的诗词道具 查看）。", ""
         self.pm.add_draw_bonus(uid, 10, uname)
         new_rate = min(10 + self.pm.get_draw_bonus(uid, uname), 100)
-        return False, f"未抽中（本次 {rate}%），下次概率提升至 {new_rate}%。"
+        ach = ""
+        if new_rate >= 100 and self.pm.unlock_achievement(uid, "unlucky", uname):
+            ach = f"🏆 {uname} 达成成就「{ACHIEVEMENTS.get('unlucky', ('真有这么倒霉的人啊？', ''))[0]}」！"
+        return False, f"未抽中（本次 {rate}%），下次概率提升至 {new_rate}%。", ach
 
     @filter.command("抽道具")
     async def draw_item(self, event: AstrMessageEvent, text: str = ""):
@@ -742,7 +745,10 @@ class PoetryPlugin(Star):
         self.pm.record_verse(uid, verse, uname)
         for a in self.pm.check_verse_achievements(uid, uname):
             yield event.plain_result(f"🏆 {uname} 达成成就「{ACHIEVEMENTS.get(a, (a, ''))[0]}」！")
-        yield event.plain_result(self._roll_draw(uid, uname)[1])
+        _hit, _tip, _ach = self._roll_draw(uid, uname)
+        yield event.plain_result(_tip)
+        if _ach:
+            yield event.plain_result(_ach)
 
     def _puzzle_matches_format(self, de, side, old_puzzle, new_puzzle):
         """校验新题（金蝉脱壳用）与旧题同格式，且为库中真实诗句。"""
@@ -1992,9 +1998,11 @@ class PoetryPlugin(Star):
         self.pm.inc_stat(uid, "total_guesses", 1, uname)
         # 游戏内抽道具：用到了自己诗句库中没有的新句 → 触发一次抽道具（仅命中时提示）
         if added > 0 and uid != BOT_ID:
-            _hit, _tip = self._roll_draw(uid, uname)
+            _hit, _tip, _ach = self._roll_draw(uid, uname)
             if _hit:
                 msgs.append(("text", f"✨ {uname} 使用新诗句，触发抽道具！{_tip}"))
+            if _ach:
+                msgs.append(("text", _ach))
         # 检查个人/特殊成就
         for a in self.pm.check_verse_achievements(uid, uname):
             msgs.append(("text", f"🏆 {uname} 达成成就「{ACHIEVEMENTS.get(a, (a,''))[0]}」！"))
@@ -2396,9 +2404,11 @@ class PoetryPlugin(Star):
         self.pm.inc_stat(uid, "total_guesses", 1, uname)
         # 游戏内抽道具：用到了自己诗句库中没有的新句 → 触发一次抽道具（仅命中时提示）
         if added > 0 and uid != BOT_ID:
-            _hit, _tip = self._roll_draw(uid, uname)
+            _hit, _tip, _ach = self._roll_draw(uid, uname)
             if _hit:
                 msgs.append(("text", f"✨ {uname} 使用新诗句，触发抽道具！{_tip}"))
+            if _ach:
+                msgs.append(("text", _ach))
         # 🐖 重复诗句检测（本局内自己发过的纯汉字）
         if "user_verses" not in duel:
             duel["user_verses"] = {}
