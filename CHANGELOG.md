@@ -1,5 +1,10 @@
 # 更新日志
 
+## v3.15.7 (2026-09-07)
+
+### 修复
+- 🐛 修复 v3.15.6 装饰器错位问题：`_handle_shell_private` 被误注册为消息 Handler，导致每条消息报 `Plugin Handler arguments do not match` 且游戏对垒无法推进
+
 ## v3.15.6 (2026-09-07)
 
 ### 优化

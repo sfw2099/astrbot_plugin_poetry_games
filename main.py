@@ -2712,9 +2712,8 @@ class PoetryPlugin(Star):
         return titles
 
     # ==========================================
-    # 全局监听分发中枢
+    # 全局文本消息处理器
     # ==========================================
-    @filter.event_message_type(filter.EventMessageType.ALL)
     async def _handle_shell_private(self, event, msg_raw, is_private, handled):
         """金蝉脱壳：玩家在私聊发送新题（cc 前缀），校验后换题并通知对垒群。返回是否已处理。"""
         if not is_private:
@@ -2767,6 +2766,7 @@ class PoetryPlugin(Star):
         except Exception:
             pass
 
+    @filter.event_message_type(filter.EventMessageType.ALL)
     async def handle_recv_msg(self, event: AstrMessageEvent):
         msg_raw = event.message_str.strip()
         # 🍵 诗词对垒处理（优先，含确认/私聊出题/群聊猜测）
