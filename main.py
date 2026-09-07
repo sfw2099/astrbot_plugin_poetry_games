@@ -743,6 +743,35 @@ class PoetryPlugin(Star):
             yield event.plain_result(f"🏆 {uname} 达成成就「{ACHIEVEMENTS.get(a, (a, ''))[0]}」！")
         yield event.plain_result(self._roll_draw(uid, uname)[1])
 
+    def _puzzle_matches_format(self, de, side, old_puzzle, new_puzzle):
+        """校验新题（金蝉脱壳用）与旧题同格式，且为库中真实诗句。"""
+        old_h = re.sub(r"[^\u4e00-\u9fff]", "", old_puzzle)
+        old_punct = extract_punct(old_puzzle)
+        nh = re.sub(r"[^\u4e00-\u9fff]", "", new_puzzle)
+        npunct = extract_punct(new_puzzle)
+
+        def _lens(h, ps):
+            ps = [p for p in ps if p[0] < len(h)]
+            lens = []
+            cur = 0
+            for pos, _p in ps:
+                lens.append(pos - cur)
+                cur = pos
+            lens.append(len(h) - cur)
+            return lens
+
+        if not old_punct:
+            # 单句：无标点、字数一致、库中、不与旧题相同
+            return (not npunct) and len(nh) == len(old_h) and nh != old_h and self._is_in_library(new_puzzle)
+        # 两句：分句结构一致、库中相邻、不与旧题相同
+        if not npunct or nh == old_h:
+            return False
+        if _lens(nh, npunct) != _lens(old_h, old_punct):
+            return False
+        segs = re.split(r"[，。！？、；：]", new_puzzle)
+        segs = [re.sub(r"[^\u4e00-\u9fff]", "", s) for s in segs if re.sub(r"[^\u4e00-\u9fff]", "", s)]
+        return len(segs) == 2 and bool(self.db) and self.db.is_adjacent_pair(segs[0], segs[1])
+
     async def _do_use_item(self, event, uid, uname, item, count, tail, at_id):
         """按道具分发。返回 str 或 async generator。"""
         from .game.items import ITEMS as _I
@@ -766,13 +795,15 @@ class PoetryPlugin(Star):
                 target_author = getattr(engine, "author", "")
             elif duel is not None and duel.get("engine"):
                 de = duel["engine"]
-                # 当前轮到谁，就提示谁要猜的目标
-                cur = de.current_side()
-                target_parts = de.target_parts_of(cur)
-                target_text = de.a_target_hanzi if cur == "a" else de.b_target_hanzi
-                # 作者：从题目元数据查
+                # 提示的是「使用者自己」要猜的目标（对方出的题），不随当前轮到谁
+                my_side = "a" if uid == de.a_id else ("b" if uid == de.b_id else None)
+                if my_side is None:
+                    return "未找到你在对垒中的位置。"
+                target_parts = de.target_parts_of(my_side)
+                target_text = de.a_target_hanzi if my_side == "a" else de.b_target_hanzi
+                # 作者：从对方出的题元数据查
                 try:
-                    puzzle = duel.get("puzzles", {}).get(de.b_id if cur == "a" else de.a_id, "")
+                    puzzle = duel.get("puzzles", {}).get(de.b_id if my_side == "a" else de.a_id, "")
                     meta = self.db.check_exact_poetry(puzzle) if self.db else None
                     target_author = meta[1] if meta else ""
                 except Exception:
@@ -834,7 +865,7 @@ class PoetryPlugin(Star):
                 yield event.plain_result(f"🔮 定仙游：已重新出题（含「{ch[0]}」），旧题目作废，请重新开始猜测。")
                 yield event.image_result(blank_path)
             return _gen()
-        # 金蝉脱壳：对垒换自己出的题
+        # 金蝉脱壳：对垒换自己出的题（由使用者提供新题，且不透题）
         if item == "金蝉脱壳":
             if duel is None or not duel.get("engine"):
                 return "金蝉脱壳需在诗词对垒进行中、且轮到你的回合使用。"
@@ -842,16 +873,26 @@ class PoetryPlugin(Star):
             side = "a" if uid == de.a_id else "b"
             if not de.is_turn(uid):
                 return "现在不是你的回合，无法使用金蝉脱壳。"
-            old_puzzle = duel.get("puzzles", {}).get(uid, "")
-            new_puzzle = self._pick_duel_replacement(de, side, old_puzzle)
+            new_puzzle = (tail or "").strip()
             if not new_puzzle:
-                return "未找到合适的同格式题目，请稍后再试。"
+                return "用法：/诗词道具 金蝉脱壳 新诗句（需与当前格式一致、为库中真实诗句）。"
+            old_puzzle = duel.get("puzzles", {}).get(uid, "")
+            if not self._puzzle_matches_format(de, side, old_puzzle, new_puzzle):
+                return "新题格式需与当前一致且为库中真实诗句。"
             de.replace_side_puzzle(side, new_puzzle)
             duel["puzzles"][uid] = new_puzzle
             duel.setdefault("user_verses", {}).setdefault(
                 de.b_id if side == "a" else de.a_id, set()).clear()
             self.pm.consume_item(uid, item, count, uname)
-            return f"🪙 金蝉脱壳：你的题目已更换为「{new_puzzle}」（对方要重新猜了）。"
+            # 不透题：不回显新题明文
+            import time as _t
+            duel_img = os.path.join(str(self.plugin_data_dir), f"duel_{duel_sid}_{int(_t.time())}.png")
+            render_duel(de, duel_img, hint_mode=duel.get("hint_mode", "pinyin"))
+
+            async def _gen():
+                yield event.plain_result("🪙 金蝉脱壳：已更换你出的题，对方要重新猜了。请继续游戏。")
+                yield event.image_result(duel_img)
+            return _gen()
         # 探囊取物：@玩家 偷一个道具
         if item == "探囊取物":
             if not at_id or at_id == uid:
