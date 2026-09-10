@@ -178,6 +178,33 @@ class PoetryDB:
                             break
         return candidates
 
+    def search_combo_by_char(self, a_len, b_len, ch, limit=30):
+        """按「包含字 + 相邻 a字+b字 两句」精确检索候选诗句。
+
+        用 SQL LIKE 直接命中含字诗篇，再拆相邻两句精确匹配格式。
+        返回 [(combined, title, author, dynasty)]，combined 保留原分隔符（如「离离原上草，一岁一枯荣」）。
+        """
+        ch = re.sub(r'[^\u4e00-\u9fa5]', '', ch or '')
+        if not ch:
+            return []
+        candidates = []
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT title, author, dynasty, content FROM poems WHERE content LIKE ? LIMIT 800", (f'%{ch}%',))
+                for title, author, dynasty, content in cursor.fetchall():
+                    clauses = self._split_clauses(content)
+                    for i in range(len(clauses) - 1):
+                        ha, pa = clauses[i]
+                        hb, pb = clauses[i + 1]
+                        if len(ha) == a_len and len(hb) == b_len and ch in ha + hb:
+                            candidates.append((f"{ha}{pa}{hb}", title, author, dynasty))
+                            if len(candidates) >= limit:
+                                return candidates
+        except Exception:
+            pass
+        return candidates
+
     def is_adjacent_pair(self, a_text, b_text):
         """判断 a_text、b_text 是否为库中某首诗的相邻两个分句。"""
         ca = re.sub(r'[^\u4e00-\u9fa5]', '', a_text)

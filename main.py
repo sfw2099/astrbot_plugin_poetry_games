@@ -999,7 +999,19 @@ class PoetryPlugin(Star):
         """猜诗句同格式下随机找一句含 ch 的诗句。返回 (sentence,title,author,dynasty) 或 None。"""
         import random as _r
         fmt = self._current_engine_fmt(engine)
-        # 经典曲库候选
+        # 优先：总库 SQL 直接按含字检索（确定性高，避免随机抽样碰运气）
+        if self.db:
+            try:
+                if fmt[0] == "single":
+                    rows = self.db.search_by_chars_and_len([ch], fmt[1], limit=30)
+                else:
+                    rows = self.db.search_combo_by_char(fmt[1][0], fmt[1][1], ch, limit=30)
+                for verse, title, author, dynasty in _r.sample(rows, min(len(rows), 5)):
+                    if verse != engine.target_text:
+                        return (verse, title, author, dynasty)
+            except Exception:
+                pass
+        # 兜底：经典曲库候选
         cands = []
         for p in self.classic_poems or []:
             sent = (p.get("sentence") or "")
@@ -1017,9 +1029,10 @@ class PoetryPlugin(Star):
                     if len(segs) == len(fmt[1]) and all(len(s) == n for s, n in zip(segs, fmt[1])):
                         cands.append((sent, p))
         if cands:
-            sent, p = _r.choice(cands)
-            return (sent, p.get("title", ""), p.get("author", ""), p.get("dynasty", ""))
-        # 总库候选（随机抽同格式句筛含字，最多尝试若干）
+            for sent, p in _r.sample(cands, min(len(cands), 5)):
+                if sent != engine.target_text:
+                    return (sent, p.get("title", ""), p.get("author", ""), p.get("dynasty", ""))
+        # 最后兜底：总库随机抽样（低命中率，仅 db 检索异常时）
         if self.db:
             try:
                 if fmt[0] == "single":
