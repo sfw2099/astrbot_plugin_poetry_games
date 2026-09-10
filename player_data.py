@@ -81,6 +81,17 @@ ACHIEVEMENTS = {
     "crychic": ("CRYCHIC", "猜诗句 3 人参与并通关，且本局出现过「苦」「来」「兮」三字"),
     # 抽道具
     "unlucky": ("真有这么倒霉的人啊？", "抽道具连续失败，保底概率累计至 100% 必中"),
+    # 劫难（猜诗句，通关含该劫难的一局即解锁）
+    "yiquebaohan": ("一缺抱憾", "通关含有【一缺抱憾】劫难的一局猜诗句"),
+    "qibuchengshi": ("七步成诗", "通关含有【七步成诗】劫难的一局猜诗句"),
+    "dashengxisheng": ("大音希声", "通关含有【大音希声】劫难的一局猜诗句"),
+    "sanjianqikou": ("三缄其口", "通关含有【三缄其口】劫难的一局猜诗句"),
+    "yangguowuhen": ("雁过无痕", "通关含有【雁过无痕】劫难的一局猜诗句"),
+    "guoyanyunyan": ("过眼云烟", "通关含有【过眼云烟】劫难的一局猜诗句"),
+    "baijuguoxi": ("白驹过隙", "通关含有【白驹过隙】劫难的一局猜诗句"),
+    "tuichenchuxin": ("推陈出新", "通关含有【推陈出新】劫难的一局猜诗句"),
+    "yimaixiangcheng": ("一脉相承", "通关含有【一脉相承】劫难的一局猜诗句"),
+    "hazard_tier": ("一重天", "通关含有 x 重劫难的猜诗句（记录历史最高重，最高九重天）"),
 }
 
 # 收尾人等级：按累计次数映射等级名（升序）
@@ -127,6 +138,19 @@ def duel_streak_name(n):
         prefix = _CN[n] if n <= 10 else str(n)
         return f"{prefix}连·诛天灭地"
     return "一破·卧龙出山"
+
+
+def hazard_tier_name(n):
+    """根据历史最高「一局内劫难数」返回重天名（封顶九重天）。
+
+    1 重：一重天 … 9 重及以上：九重天。
+    """
+    _CN = ["", "一", "二", "三", "四", "五", "六", "七", "八", "九"]
+    if n <= 0:
+        return "未历劫难"
+    if n >= 9:
+        return "九重天"
+    return f"{_CN[n]}重天"
 
 
 # 旧版收尾人分阶成就 id（用于迁移清空）
@@ -333,6 +357,26 @@ class PlayerManager:
         new_lv = duel_streak_name(new_max)
         self.save(uid)
         if new_lv != duel_streak_name(old_max):
+            return new_lv
+        return None
+
+    def check_hazard_tier(self, uid, tier, name=""):
+        """更新历史最高「一局内劫难数」并检查是否升级。tier 为本局劫难数。
+        只记录历史最高重。返回升级后的重天名（若跨入新等级），否则返回 None。"""
+        p = self.load(uid, name)
+        cur = p["achievements"].get("hazard_tier", {})
+        old_max = cur.get("progress", 0)
+        new_max = max(old_max, int(tier))
+        if new_max <= 0:
+            return None
+        p["achievements"]["hazard_tier"] = {
+            "unlocked": True,
+            "time": cur.get("time", time.time()),
+            "progress": new_max,
+        }
+        new_lv = hazard_tier_name(new_max)
+        self.save(uid)
+        if new_lv != hazard_tier_name(old_max):
             return new_lv
         return None
 

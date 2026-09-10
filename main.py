@@ -20,10 +20,16 @@ from .game.guess_verse import pick_battle_target, BattleVerseEngine, render_batt
 from .game.guess_verse import DuelVerseEngine, render_duel, pick_puzzle_verse
 from .game.guess_verse import extract_hanzi, extract_punct
 from .game.guess_verse import INITIALS_LIST, FINALS_LIST
-from .player_data import PlayerManager, ACHIEVEMENTS
+from .player_data import PlayerManager, ACHIEVEMENTS, _split_single_clauses
 from .game.items import ITEMS, roll_win_item, roll_loser_item
 from .game.base_game import BOT_ID
 from .game.ai_bot import BotPlayer
+
+# 劫难 id 列表（与 player_data.ACHIEVEMENTS 中劫难成就 id 一致）
+HAZARD_IDS = [
+    "yiquebaohan", "qibuchengshi", "dashengxisheng", "sanjianqikou",
+    "yangguowuhen", "guoyanyunyan", "baijuguoxi", "tuichenchuxin", "yimaixiangcheng",
+]
 
 GITEE_BASE = "https://gitee.com/alin1031/poetry-data/releases/download/v1.0.0/poetry_data.zip"
 GITEE_PROBE = GITEE_BASE + ".part01"  # 探测分片而非基文件（基文件不存在）
@@ -476,9 +482,16 @@ class PoetryPlugin(Star):
             return
 
         self.guess_verse_sessions[session_id] = engine
+        # 劫难机制：5% 概率引来 1~3 个随机劫难（不重复）
+        import random as _rh
+        if _rh.random() < 0.05:
+            engine.hazards = _rh.sample(HAZARD_IDS, _rh.randint(1, 3))
         hint_label = "拼音" if hint_mode == "pinyin" else "部首"
+        hazard_txt = ""
+        if engine.hazards:
+            hazard_txt = "☠️ 本局劫难：" + "、".join(ACHIEVEMENTS.get(h, (h,))[0] for h in engine.hazards) + "\n"
         yield event.plain_result(
-            "🎯 【猜诗句】开始！\n"
+            "🎯 【猜诗句】开始！\n" + hazard_txt +
             f"答案格式：{self._format_desc(fmt)}，提示方式：{hint_label}。\n"
             "发送「cc 诗句」进行猜测（两句需带标点），如：cc 离离原上草，一岁一枯荣\n"
             "每次猜测后，每个字的【汉字/声母/韵母/声调】独立着色（拼音模式）：\n"
@@ -793,6 +806,8 @@ class PoetryPlugin(Star):
                 break
         # 火眼金睛 / 三仙归洞 / 仙人指路（提示类，可对猜诗句或对垒目标）
         if item in ("火眼金睛", "三仙归洞", "仙人指路"):
+            if engine is not None and "sanjianqikou" in getattr(engine, "hazards", []):
+                return "本局劫难【三缄其口】：无法使用提示类道具。"
             target_parts = None
             target_text = None
             target_author = None
@@ -844,6 +859,20 @@ class PoetryPlugin(Star):
             if target_author:
                 return f"📜 仙人指路：当前答案作者是【{target_author}】"
             return "无法解析答案作者，请稍后再试。"
+        # 招灾：猜诗句开局未猜测时，为本局追加一个随机劫难（不重复）
+        if item == "招灾":
+            if engine is None:
+                return "招灾需在猜诗句进行中使用。"
+            if getattr(engine, "history", []):
+                return "本局已有人猜测，招灾只能在开局未猜测时使用。"
+            remaining = [h for h in HAZARD_IDS if h not in getattr(engine, "hazards", [])]
+            if not remaining:
+                return "本局已集齐所有劫难。"
+            import random as _r
+            h = _r.choice(remaining)
+            engine.hazards = list(getattr(engine, "hazards", [])) + [h]
+            self.pm.consume_item(uid, item, count, uname)
+            return f"☠️ 招灾成功！本局新增劫难【{ACHIEVEMENTS.get(h, (h,))[0]}】。"
         # 定仙游：猜诗句换含字题
         if item == "定仙游":
             if engine is None:
@@ -1991,6 +2020,18 @@ class PoetryPlugin(Star):
         else:
             if not self._is_in_library(clean):
                 return _fail(f"「{clean}」不在诗词库中，请输入曲库诗句。")
+        hazards = getattr(engine, "hazards", []) or []
+        # 推陈出新：只能使用所有参与者都未积累过的新句
+        if "tuichenchuxin" in hazards:
+            for clause in _split_single_clauses(clean):
+                for p_uid in (set(getattr(engine, "participants", set())) | {uid}):
+                    if clause in self.pm.get_verses(str(p_uid)):
+                        return _fail("本局劫难【推陈出新】：须使用所有参与者都未积累过的新句。")
+        # 一脉相承：除首句外，每次猜测须与上一句共享至少一个汉字
+        if "yimaixiangcheng" in hazards and engine.history:
+            prev_h = extract_hanzi(engine.history[-1][0])
+            if not (set(hanzi) & set(prev_h)):
+                return _fail("本局劫难【一脉相承】：须与上一句共享至少一个汉字。")
         # 记录参与者与单局个人猜测次数
         if not hasattr(engine, "participants"):
             engine.participants = set()
@@ -2050,8 +2091,21 @@ class PoetryPlugin(Star):
             if has_char or has_pinyin:
                 if self.pm.unlock_achievement(uid, "first_hit_char", uname):
                     msgs.append(("text", self._achieve_msg(uid, "first_hit_char")))
+        # 七步成诗：每猜满 7 次未结束，换含某字的新题
+        if not all_correct and "qibuchengshi" in hazards and len(engine.history) % 7 == 0:
+            import random as _rr
+            ch = _rr.choice(engine.target_hanzi)
+            nv = self._pick_verse_with_char(engine, ch)
+            if nv:
+                engine._set_target(nv[0], {"title": nv[1], "author": nv[2], "dynasty": nv[3]})
+                blank_path = os.path.join(str(self.plugin_data_dir), f"verse_blank_{session_id}.png")
+                render_blank(engine, blank_path)
+                msgs.append(("text", f"⚡ 七步成诗：题目已更换（新题含「{ch}」），请重新开始猜测。"))
+                msgs.append(("image", blank_path))
+                return {"ok": True, "err": None, "comp": comp, "all_correct": False,
+                        "finished": False, "msgs": msgs}
         img_path = os.path.join(str(self.plugin_data_dir), f"verse_{session_id}.png")
-        render_grid(engine, img_path, max_attempts=None, hint_mode=engine.hint_mode)
+        render_grid(engine, img_path, max_attempts=15 if "baijuguoxi" in hazards else None, hint_mode=engine.hint_mode)
         msgs.append(("image", img_path))
         finished = False
         if all_correct:
@@ -2078,7 +2132,7 @@ class PoetryPlugin(Star):
                     msgs.append(("text", f"🎁 {pname} 获得道具【{loser_item}】！"))
             self.guess_verse_sessions.pop(session_id, None)
             finished = True
-        elif engine.is_finished():
+        elif engine.is_finished() or ("baijuguoxi" in hazards and len(engine.history) >= 15):
             ans_path = os.path.join(str(self.plugin_data_dir), f"verse_ans_{session_id}.png")
             render_answer(engine, ans_path)
             msgs.append(("image", ans_path))
@@ -2219,6 +2273,15 @@ class PoetryPlugin(Star):
                 if st.get("guess_wins", 0) >= 10:
                     if pm.unlock_achievement(p_uid, "guess_win_10", p_name):
                         msgs.append(self._achieve_msg(p_uid, "guess_win_10"))
+            # 劫难成就：通关含该劫难的一局，所有参与者解锁
+            for h in getattr(engine, "hazards", []) or []:
+                if pm.unlock_achievement(p_uid, h, p_name):
+                    msgs.append(self._achieve_msg(p_uid, h))
+            # x重天：记录历史最高劫难数（所有参与者）
+            if getattr(engine, "hazards", []):
+                tier_name = pm.check_hazard_tier(p_uid, len(engine.hazards), p_name)
+                if tier_name:
+                    msgs.append(f"🏆 {p_name} 达成成就「{tier_name}」！")
         return msgs
 
     def _settle_duel_achievements(self, duel, engine, winner_side, winner_uid):
@@ -2905,6 +2968,9 @@ class PoetryPlugin(Star):
             engine = self.guess_verse_sessions[session_id]
             # 提示指令：显示声母韵母状态（仅拼音模式）
             if msg_raw in ("提示", "声韵提示", "拼音提示"):
+                if "sanjianqikou" in getattr(engine, "hazards", []):
+                    yield event.plain_result("本局劫难【三缄其口】：无法使用提示。")
+                    return
                 if engine.hint_mode != "pinyin":
                     yield event.plain_result("当前为部首提示模式，无拼音提示。")
                     return

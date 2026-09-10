@@ -311,6 +311,9 @@ class GuessVerseEngine:
         self.author = None
         self.dynasty = None
         self.history = []  # [(guess_text, guess_parts, compare_result)]
+        # 劫难系统
+        self.hazards = []   # 本局劫难 id 列表
+        self.masked = {}    # 一缺抱憾：{history行索引: set(汉字段列索引)}
         # 经典曲库：list[dict(sentence/hanzi/chars/title/author/dynasty)]
         self.classic_poems = classic_poems or []
         self._classic_sentences = self._build_classic_index()
@@ -463,6 +466,9 @@ class GuessVerseEngine:
         self.history = []
         self.initial_status = {}
         self.final_status = {}
+        self.masked = {}
+        if not hasattr(self, "hazards"):
+            self.hazards = []
 
     def format_desc(self):
         """返回答案格式描述，如「5字单句」「5字+5字（两句）」。末尾标点不计。"""
@@ -528,6 +534,13 @@ class GuessVerseEngine:
         comp = compare_guess(guess_parts, self.target_parts)
         self.history.append((text, guess_parts, comp))
         self._record_pinyin_status(guess_parts, comp)
+
+        # 一缺抱憾：每次猜测后随机使该句某一格变空白
+        if "yiquebaohan" in self.hazards and guess_parts:
+            import random as _r
+            row = len(self.history) - 1
+            col = _r.randint(0, len(guess_parts) - 1)
+            self.masked.setdefault(row, set()).add(col)
 
         all_correct = all(
             c is not None and all(v == "correct" for v in c.values())
@@ -685,7 +698,19 @@ def render_grid(engine, output_path, title="猜诗句", max_attempts=10, hint_mo
     """
     layout = _build_layout(engine)
     n_cols = len(layout)
-    n_rows = max(1, len(engine.history))
+    hazards = getattr(engine, "hazards", []) or []
+    target_hanzi_set = set(getattr(engine, "target_hanzi", "") or "")
+    # 预筛选要渲染的行（保留历史原始索引，供雁过无痕 / 一缺抱憾 masked 对齐）
+    rows = []
+    for i, (guess_word, guess_parts, comp_result) in enumerate(engine.history):
+        if "yangguowuhen" in hazards:
+            gh = extract_hanzi(guess_word)
+            if gh != engine.target_hanzi and any(ch in target_hanzi_set for ch in gh):
+                continue  # 雁过无痕：含正确答案汉字的非答案句整行隐藏
+        rows.append((i, guess_word, guess_parts, comp_result))
+    if "guoyanyunyan" in hazards:
+        rows = rows[-5:]  # 过眼云烟：只保留最近 5 句
+    n_rows = max(1, len(rows))
 
     # 计算每列宽度
     col_widths = [PUNCT_W if t == "punct" else CELL_W for t, _ in layout]
@@ -717,9 +742,10 @@ def render_grid(engine, output_path, title="猜诗句", max_attempts=10, hint_mo
         col_x.append(cx)
         cx += w + GAP
 
-    for row_idx, (guess_word, guess_parts, comp_result) in enumerate(engine.history):
+    for row_idx, (orig_i, guess_word, guess_parts, comp_result) in enumerate(rows):
         y = y_start + row_idx * (CELL_H + GAP)
         hanzi_pos = 0
+        masked_cols = getattr(engine, "masked", {}).get(orig_i, set())
         # 部首模式：预先计算该行各格部首状态
         guess_chars = [p["char"] for p in guess_parts]
         answer_chars = [p["char"] for p in engine.target_parts]
@@ -735,10 +761,17 @@ def render_grid(engine, output_path, title="猜诗句", max_attempts=10, hint_mo
 
             cell = comp_result[hanzi_pos] if hanzi_pos < len(comp_result) else None
             gp = guess_parts[hanzi_pos] if hanzi_pos < len(guess_parts) else None
+            this_col = hanzi_pos
             hanzi_pos += 1
 
             if cell is None:
                 draw.rounded_rectangle([x, y, x + CELL_W, y + CELL_H], radius=10, fill=CELL_BG, outline=BORDER_COLOR, width=2)
+                continue
+
+            # 一缺抱憾：该格被抹去，显示空白（不显示汉字与拼音）
+            if this_col in masked_cols:
+                draw.rounded_rectangle([x, y, x + CELL_W, y + CELL_H], radius=10, fill=CELL_BG, outline=BORDER_COLOR, width=2)
+                draw.text((x + CELL_W // 2, y + CELL_H // 2), "□", fill=(170, 170, 175), font=f_char, anchor="mm")
                 continue
 
             if hint_mode == "radical":
@@ -779,7 +812,7 @@ def render_grid(engine, output_path, title="猜诗句", max_attempts=10, hint_mo
                     segments.append((initial, init_color, f_py))
                 if final:
                     segments.append((final, final_color, f_py))
-                if tone:
+                if tone and "dashengxisheng" not in hazards:
                     segments.append((tone, tone_color, f_py, 8))
                 total_w = _draw_pinyin_joined(draw, x + CELL_W // 2, py_mid, segments)
                 # 音节(声母+韵母)在原句中出现过，且整字未完全正确 → 拼音下加下划线
@@ -1608,9 +1641,9 @@ def render_achievements(uid, uname, achs, output_path):
     achs: 成就字典 {id: {unlocked, time, progress}}（含未解锁）。
     """
     try:
-        from ..player_data import ACHIEVEMENTS, closer_level_name, duel_streak_name
+        from ..player_data import ACHIEVEMENTS, closer_level_name, duel_streak_name, hazard_tier_name
     except ImportError:
-        from player_data import ACHIEVEMENTS, closer_level_name, duel_streak_name
+        from player_data import ACHIEVEMENTS, closer_level_name, duel_streak_name, hazard_tier_name
     pad = 30
     title_h = 70
     row_h = 40
@@ -1651,6 +1684,9 @@ def render_achievements(uid, uname, achs, output_path):
         elif k == "duel_streak":
             name = duel_streak_name(v.get("progress", 0))
             desc = f"最高 {v.get('progress', 0)} 连"
+        elif k == "hazard_tier":
+            name = hazard_tier_name(v.get("progress", 0))
+            desc = f"最高 {v.get('progress', 0)} 重"
         elif k == "beloved_verse":
             name = f"挚爱诗句-{v.get('verse', '')}"
             desc = f"使用 {v.get('progress', 0)} 次"
@@ -1669,6 +1705,9 @@ def render_achievements(uid, uname, achs, output_path):
             if k == "duel_streak":
                 name = duel_streak_name(v.get("progress", 0))
                 desc = f"最高 {v.get('progress', 0)} 连"
+            if k == "hazard_tier":
+                name = hazard_tier_name(v.get("progress", 0))
+                desc = f"最高 {v.get('progress', 0)} 重"
             draw.rounded_rectangle([pad, y, img_w - pad, y + row_h], radius=8, fill=(248, 248, 250),
                                    outline=(220, 220, 225), width=1)
             draw.text((pad + 14, y + row_h // 2), f"[进行中] {name}", fill=(120, 120, 125), font=item_font, anchor="lm")
