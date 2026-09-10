@@ -873,6 +873,62 @@ def render_blank(engine, output_path):
     return output_path
 
 
+# 劫难 id -> 效果描述（渲染 /当前劫难 图用）
+HAZARD_EFFECTS = {
+    "yiquebaohan": "每次猜测后随机使该句某一格变空白",
+    "qibuchengshi": "每猜满 7 次未结束，换含某字的新题",
+    "dashengxisheng": "本局不显示声调",
+    "sanjianqikou": "本局无法使用提示类道具与提示命令",
+    "yangguowuhen": "含正确答案汉字的非答案句整行隐藏",
+    "guoyanyunyan": "只显示最近 5 句猜测",
+    "baijuguoxi": "本局最多 15 次猜测，超限判负",
+    "tuichenchuxin": "只能使用所有参与者都未积累的新句",
+    "yimaixiangcheng": "除首句外，每次猜测须与上一句共享汉字",
+}
+
+
+def render_hazards(engine, output_path):
+    """渲染本局劫难图。engine.hazards 为空时显示无劫难。"""
+    try:
+        from ..player_data import ACHIEVEMENTS
+    except ImportError:
+        from player_data import ACHIEVEMENTS
+    hazards = getattr(engine, "hazards", []) or []
+    pad = 30
+    title_h = 70
+    title_font = _get_font(26)
+    name_font = _get_font(22)
+    desc_font = _get_font(16)
+
+    if not hazards:
+        img_w = 560
+        img_h = pad + title_h + 70 + pad
+        img = Image.new("RGB", (img_w, img_h), (250, 250, 252))
+        draw = ImageDraw.Draw(img)
+        draw.text((img_w // 2, 20), "当前劫难", fill=(40, 40, 40), font=title_font, anchor="mt")
+        draw.text((img_w // 2, pad + title_h + 30), "☀️ 本局风平浪静，暂无劫难", fill=(120, 120, 125), font=name_font, anchor="mm")
+        img.save(output_path, "PNG")
+        return output_path
+
+    row_h = 62
+    img_w = 640
+    img_h = pad + title_h + len(hazards) * (row_h + 8) + pad
+    img = Image.new("RGB", (img_w, img_h), (250, 250, 252))
+    draw = ImageDraw.Draw(img)
+    draw.text((img_w // 2, 20), f"当前劫难（{len(hazards)} 重）", fill=(40, 40, 40), font=title_font, anchor="mt")
+    y = pad + title_h
+    for h in hazards:
+        name = ACHIEVEMENTS.get(h, (h, ""))[0]
+        desc = HAZARD_EFFECTS.get(h, ACHIEVEMENTS.get(h, (h, ""))[1])
+        draw.rounded_rectangle([pad, y, img_w - pad, y + row_h], radius=8, fill=(255, 255, 255),
+                               outline=(200, 200, 205), width=1)
+        draw.text((pad + 14, y + 15), f"☠️ {name}", fill=(200, 60, 60), font=name_font, anchor="lm")
+        draw.text((pad + 14, y + 42), desc, fill=(120, 120, 125), font=desc_font, anchor="lm")
+        y += row_h + 8
+    img.save(output_path, "PNG")
+    return output_path
+
+
 def render_answer(engine, output_path):
     """渲染答案揭示图（含标点）。"""
     layout = _build_layout(engine)

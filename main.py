@@ -15,7 +15,7 @@ from .database import PoetryDB
 from .game.flowing_petals import FlowingPetalsEngine
 from .game.crossword_poetry import PoetryCrosswordEngine
 from .game.snake_poetry import PoetrySnakeEngine
-from .game.guess_verse import GuessVerseEngine, render_grid, render_blank, render_answer, render_hint, _init_plugin_dir
+from .game.guess_verse import GuessVerseEngine, render_grid, render_blank, render_answer, render_hint, render_hazards, _init_plugin_dir
 from .game.guess_verse import pick_battle_target, BattleVerseEngine, render_battle
 from .game.guess_verse import DuelVerseEngine, render_duel, pick_puzzle_verse
 from .game.guess_verse import extract_hanzi, extract_punct
@@ -516,6 +516,17 @@ class PoetryPlugin(Star):
             yield event.plain_result(f"游戏结束，正确诗句：{engine.target_text}")
         else:
             yield event.plain_result("当前没有进行中的猜诗句游戏。")
+
+    @filter.command("当前劫难")
+    async def current_hazards(self, event: AstrMessageEvent):
+        session_id = str(event.get_group_id() or event.get_session_id())
+        engine = self.guess_verse_sessions.get(session_id)
+        if engine is None:
+            yield event.plain_result("当前没有进行中的猜诗句游戏。")
+            return
+        img_path = os.path.join(str(self.plugin_data_dir), f"hazards_{session_id}.png")
+        render_hazards(engine, img_path)
+        yield event.image_result(img_path)
 
     @filter.command("猜诗句帮助")
     async def guess_verse_help(self, event: AstrMessageEvent):
