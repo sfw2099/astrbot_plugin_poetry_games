@@ -2053,8 +2053,8 @@ class PoetryPlugin(Star):
             if not self._is_in_library(clean):
                 return _fail(f"「{clean}」不在诗词库中，请输入曲库诗句。")
         hazards = getattr(engine, "hazards", []) or []
-        # 推陈出新：只能使用所有参与者都未积累过的新句
-        if "tuichenchuxin" in hazards:
+        # 推陈出新：只能使用所有参与者都未积累过的新句（答案本身除外，避免死局）
+        if "tuichenchuxin" in hazards and hanzi != engine.target_hanzi:
             for clause in _split_single_clauses(clean):
                 for p_uid in (set(getattr(engine, "participants", set())) | {uid}):
                     if clause in self.pm.get_verses(str(p_uid)):
