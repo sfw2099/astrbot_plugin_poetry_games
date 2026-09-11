@@ -482,10 +482,10 @@ class PoetryPlugin(Star):
             return
 
         self.guess_verse_sessions[session_id] = engine
-        # 劫难机制：5% 概率引来 1~3 个随机劫难（不重复）
+        # 劫难机制：20% 概率引来 1~5 个随机劫难（不重复）
         import random as _rh
-        if _rh.random() < 0.05:
-            engine.hazards = _rh.sample(HAZARD_IDS, _rh.randint(1, 3))
+        if _rh.random() < 0.20:
+            engine.hazards = _rh.sample(HAZARD_IDS, _rh.randint(1, 5))
         hint_label = "拼音" if hint_mode == "pinyin" else "部首"
         hazard_txt = ""
         if engine.hazards:
@@ -884,6 +884,27 @@ class PoetryPlugin(Star):
             engine.hazards = list(getattr(engine, "hazards", [])) + [h]
             self.pm.consume_item(uid, item, count, uname)
             return f"☠️ 招灾成功！本局新增劫难【{ACHIEVEMENTS.get(h, (h,))[0]}】。"
+        # 解难：随机解除当前的一个劫难（支持 count 解多个）
+        if item == "解难":
+            if engine is None:
+                return "解难需在猜诗句进行中使用。"
+            hazards = list(getattr(engine, "hazards", []) or [])
+            if not hazards:
+                return "本局没有劫难可解。"
+            import random as _r
+            removed = []
+            for _ in range(count):
+                if not hazards:
+                    break
+                h = _r.choice(hazards)
+                hazards.remove(h)
+                removed.append(h)
+            if removed:
+                engine.hazards = hazards
+                self.pm.consume_item(uid, item, len(removed), uname)
+                names = "、".join(ACHIEVEMENTS.get(h, (h,))[0] for h in removed)
+                return f"🧧 解难成功！已解除劫难【{names}】。"
+            return "本局没有劫难可解。"
         # 定仙游：猜诗句换含字题
         if item == "定仙游":
             if engine is None:
@@ -2127,20 +2148,30 @@ class PoetryPlugin(Star):
             msgs.append(("text", f"🎉 猜中了！{engine.target_text}\n（本局参与 {n_participants} 人）"))
             for m in self._settle_guess_verse_achievements(engine, uid, uname):
                 msgs.append(("text", m))
-            # 道具掉落：胜者按自身猜测次数概率，败者(其他参与者)固定 5%
-            wg = engine.user_guesses.get(uid, 0) if hasattr(engine, "user_guesses") else len(engine.history)
-            win_item = roll_win_item(wg, "verse")
-            if win_item:
-                self.pm.add_item(uid, win_item, 1, uname)
-                msgs.append(("text", f"🎁 {uname} 获得道具【{win_item}】！"))
-            for puid in list(getattr(engine, "participants", set())):
-                if str(puid) == str(uid):
-                    continue
-                loser_item = roll_loser_item("verse")
-                if loser_item:
+            # 道具掉落
+            if getattr(engine, "hazards", []):
+                # 有劫难局：每个参与者必得 1 个道具（招灾/解难二选一），替换原概率掉落
+                import random as _rr
+                for puid in list(getattr(engine, "participants", set())):
+                    reward = _rr.choice(["招灾", "解难"])
                     pname = self._uid_name(puid)
-                    self.pm.add_item(puid, loser_item, 1, pname)
-                    msgs.append(("text", f"🎁 {pname} 获得道具【{loser_item}】！"))
+                    self.pm.add_item(str(puid), reward, 1, pname)
+                    msgs.append(("text", f"🎁 {pname} 通关劫难，获得道具【{reward}】！"))
+            else:
+                # 无劫难局：胜者按自身猜测次数概率，败者(其他参与者)固定 5%
+                wg = engine.user_guesses.get(uid, 0) if hasattr(engine, "user_guesses") else len(engine.history)
+                win_item = roll_win_item(wg, "verse")
+                if win_item:
+                    self.pm.add_item(uid, win_item, 1, uname)
+                    msgs.append(("text", f"🎁 {uname} 获得道具【{win_item}】！"))
+                for puid in list(getattr(engine, "participants", set())):
+                    if str(puid) == str(uid):
+                        continue
+                    loser_item = roll_loser_item("verse")
+                    if loser_item:
+                        pname = self._uid_name(puid)
+                        self.pm.add_item(puid, loser_item, 1, pname)
+                        msgs.append(("text", f"🎁 {pname} 获得道具【{loser_item}】！"))
             self.guess_verse_sessions.pop(session_id, None)
             finished = True
         elif engine.is_finished() or ("baijuguoxi" in hazards and len(engine.history) >= 15):
